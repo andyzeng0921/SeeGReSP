@@ -1,0 +1,22 @@
+graspnet_server:
+  ros__parameters:
+    color_topic: /head_camera/color/image_raw
+    depth_topic: /head_camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /head_camera/color/camera_info
+    base_frame: Link_Zero_Point
+    graspnet_root: /home/ubuntu/open_source/graspnet-baseline
+    checkpoint_path: /home/ubuntu/models/graspnet/checkpoint-rs.tar
+    device: cuda:0
+    number_points: 20000
+    number_views: 300
+    minimum_target_points: 300
+    depth_scale: 0.001
+    target_depth_band: 0.08
+    collision_threshold: 0.01
+    collision_voxel_size: 0.01
+    minimum_grasp_score: 0.25
+    maximum_gripper_width: 0.10
+    maximum_candidates: 20
+    pregrasp_offset: 0.12
+    approach_axis: 0
+    tf_timeout: 0.2
