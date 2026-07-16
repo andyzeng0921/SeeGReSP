@@ -155,7 +155,30 @@ class GraspCoordinator(Node):
         candidates = [item for item in estimate.candidates if item.score >= minimum_score]
         if not candidates:
             return self._abort(goal_handle, result, 'no GraspNet candidate passed score filter')
-        candidate = max(candidates, key=lambda item: item.score)
+        candidate = None
+        planning = None
+        planning_errors = []
+        for item in sorted(candidates, key=lambda value: value.score, reverse=True):
+            self._feedback(
+                goal_handle,
+                'planning',
+                f'checking score={item.score:.3f}, arm={item.arm}',
+                0.0,
+                0.0,
+            )
+            plan_request = ExecuteCandidate.Request()
+            plan_request.candidate = item
+            plan_request.execute = False
+            planning = self._call(self._execute_client, plan_request)
+            if planning is not None and planning.success:
+                candidate = item
+                break
+            planning_errors.append(
+                'service unavailable' if planning is None else planning.message
+            )
+        if candidate is None:
+            detail = '; '.join(planning_errors[:3])
+            return self._abort(goal_handle, result, f'no reachable grasp candidate: {detail}')
         result.selected_grasp = candidate
 
         self._feedback(
@@ -165,10 +188,12 @@ class GraspCoordinator(Node):
             0.0,
             0.0,
         )
-        execute_request = ExecuteCandidate.Request()
-        execute_request.candidate = candidate
-        execute_request.execute = goal.execute
-        execution = self._call(self._execute_client, execute_request)
+        execution = planning
+        if goal.execute:
+            execute_request = ExecuteCandidate.Request()
+            execute_request.candidate = candidate
+            execute_request.execute = True
+            execution = self._call(self._execute_client, execute_request)
         if execution is None or not execution.success:
             return self._abort(goal_handle, result, 'execution failed: ' + (
                 'service unavailable' if execution is None else execution.message

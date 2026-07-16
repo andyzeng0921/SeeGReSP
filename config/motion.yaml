@@ -9,7 +9,7 @@ adaptive_grasp_motion_executor:
     workspace_minimum: [0.10, -0.75, 0.20]
     workspace_maximum: [0.85, 0.75, 1.45]
     motion_timeout: 12.0
-    position_tolerance: 0.025
+    position_tolerance: 0.04
     orientation_tolerance: 0.15
     maximum_gripper_width: 0.095
     gripper_open_position: 10.0

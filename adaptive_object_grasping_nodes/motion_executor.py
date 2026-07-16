@@ -190,8 +190,20 @@ class MotionExecutor(Node):
             response.message = error
             return response
         if not request.execute or bool(self.get_parameter('dry_run').value):
-            response.success = True
-            response.message = 'candidate validated in dry-run; no hardware command sent'
+            try:
+                backend = str(self.get_parameter('planning_backend').value)
+                if backend == 'vendor_rrt':
+                    self._validate_vendor_rrt_candidate(candidate)
+                    response.message = (
+                        'vendor IK/FK/RRT validated pregrasp, grasp and lift; '
+                        'no hardware command sent'
+                    )
+                else:
+                    response.message = 'candidate validated in dry-run; no hardware command sent'
+                response.success = True
+            except Exception as exc:
+                response.message = f'dry-run planning failed: {exc}'
+                self._publish_status('failed', response.message)
             return response
         if not self._execution_unlocked():
             response.message = 'hardware execution remains locked by configuration or hardware probe'
@@ -290,6 +302,30 @@ class MotionExecutor(Node):
         self._publish_status('completed', arm)
 
     def _move_rrt_and_wait(self, arm, pose, stage):
+        target_position, target_orientation, trajectory = self._plan_vendor_rrt_pose(
+            arm, pose, stage
+        )
+        self._publish_status(f'executing_{stage}', arm)
+        self._vendor_trajectory_pub.publish(String(data=json.dumps({
+            'traj_deg': trajectory,
+            'duration': float(self.get_parameter('vendor_trajectory_duration').value),
+            'excluded_joints_name': list(self.get_parameter('vendor_excluded_joints').value),
+            'position_tolerance': 2.0,
+        })))
+        self._wait_for_eef(arm, target_position, target_orientation, stage)
+
+    def _validate_vendor_rrt_candidate(self, candidate):
+        lift = copy.deepcopy(candidate.grasp_pose)
+        lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        for stage, pose in (
+            ('pregrasp', candidate.pregrasp_pose),
+            ('grasp', candidate.grasp_pose),
+            ('lift', lift),
+        ):
+            self._plan_vendor_rrt_pose(candidate.arm, pose, stage)
+        self._publish_status('dry_run_planned', candidate.arm)
+
+    def _plan_vendor_rrt_pose(self, arm, pose, stage):
         self._publish_status(f'ik_{stage}', arm)
         target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
         with self._condition:
@@ -327,15 +363,7 @@ class MotionExecutor(Node):
             'RRT',
         )
         trajectory = validate_vendor_trajectory(planned.get('trajectory'))
-
-        self._publish_status(f'executing_{stage}', arm)
-        self._vendor_trajectory_pub.publish(String(data=json.dumps({
-            'traj_deg': trajectory,
-            'duration': float(self.get_parameter('vendor_trajectory_duration').value),
-            'excluded_joints_name': list(self.get_parameter('vendor_excluded_joints').value),
-            'position_tolerance': 2.0,
-        })))
-        self._wait_for_eef(arm, target_position, target_orientation, stage)
+        return target_position, target_orientation, trajectory
 
     def _call_vendor_service(self, client, payload, label):
         timeout = float(self.get_parameter('vendor_service_timeout').value)
