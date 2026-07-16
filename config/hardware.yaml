@@ -18,3 +18,23 @@ adaptive_grasp_hardware_probe:
     left_tcp_frame: left_grasp_tcp
     right_tcp_frame: right_grasp_tcp
     maximum_data_age: 1.0
+
+adaptive_grasp_robot_tf:
+  ros__parameters:
+    robot_description_path: /home/ubuntu/miniconda3/envs/robot_env/lib/python3.12/site-packages/autolife_robot_sdk/descriptions/autolife_s1/urdfs/robot_v2_2.urdf
+    joint_state_topic: /topic_arm_whole_body_and_gripper_current_joints_status_0_283
+    eef_pose_topic: /topic_arm_current_robot_eef_pose_0_283
+    base_frame: Link_Zero_Point
+    camera_mount_frame: Link_Camera_Head_Forehead
+    camera_frame: rgbd_head_color_optical_frame
+    left_eef_frame: Link_Left_Wrist_Lower_to_Gripper
+    right_eef_frame: Link_Right_Wrist_Lower_to_Gripper
+    left_tcp_frame: left_grasp_tcp
+    right_tcp_frame: right_grasp_tcp
+    camera_mount_to_optical_translation: [0.0, 0.0, 0.0]
+    camera_mount_to_optical_quaternion: [0.0, 0.0, 0.7071067812, 0.7071067812]
+    left_tcp_translation: [0.20187, -0.00014, -0.03035]
+    right_tcp_translation: [0.20188, 0.0, -0.03035]
+    left_tcp_quaternion: [0.0, 0.0, 0.0, 1.0]
+    right_tcp_quaternion: [0.0, 0.0, 0.0, 1.0]
+    head_offsets_deg: [0.0, -1.0, 4.0]

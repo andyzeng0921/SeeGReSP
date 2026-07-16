@@ -15,7 +15,7 @@ graspnet_server:
     collision_threshold: 0.01
     collision_voxel_size: 0.01
     minimum_grasp_score: 0.25
-    maximum_gripper_width: 0.10
+    maximum_gripper_width: 0.095
     maximum_candidates: 20
     pregrasp_offset: 0.12
     approach_axis: 0

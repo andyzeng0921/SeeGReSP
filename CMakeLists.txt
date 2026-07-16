@@ -32,6 +32,7 @@ install(PROGRAMS
   scripts/grasp_coordinator_node.py
   scripts/rgbd_shm_bridge_robot_env.sh
   scripts/rgbd_shm_bridge_node.py
+  scripts/robot_tf_broadcaster_node.py
   scripts/pbvs_servo_node.py
   scripts/yolo_tracker_node.py
   scripts/yolo_tracker_venv.sh
@@ -56,6 +57,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(pbvs_core_test test/test_pbvs_core.py)
   ament_add_pytest_test(graspnet_core_test test/test_graspnet_core.py)
   ament_add_pytest_test(motion_core_test test/test_motion_core.py)
+  ament_add_pytest_test(robot_geometry_core_test test/test_robot_geometry_core.py)
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

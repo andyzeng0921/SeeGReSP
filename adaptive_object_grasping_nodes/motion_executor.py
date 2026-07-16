@@ -18,6 +18,7 @@ from adaptive_object_grasping_nodes.motion_core import (
     vendor_pose_payload,
     width_to_gripper_position,
 )
+from adaptive_object_grasping_nodes.robot_geometry_core import tcp_target_to_eef
 
 
 class MotionExecutor(Node):
@@ -39,6 +40,10 @@ class MotionExecutor(Node):
         self.declare_parameter('gripper_closed_position', 330.0)
         self.declare_parameter('gripper_wait', 1.0)
         self.declare_parameter('lift_distance', 0.10)
+        self.declare_parameter('left_tcp_translation', [0.20187, -0.00014, -0.03035])
+        self.declare_parameter('right_tcp_translation', [0.20188, 0.0, -0.03035])
+        self.declare_parameter('left_tcp_quaternion', [0.0, 0.0, 0.0, 1.0])
+        self.declare_parameter('right_tcp_quaternion', [0.0, 0.0, 0.0, 1.0])
         self.declare_parameter('moveit_left_group', 'Left_Arm')
         self.declare_parameter('moveit_right_group', 'Right_Arm')
         self.declare_parameter('moveit_left_tip', 'Link_Left_Wrist_Lower_to_Gripper')
@@ -216,13 +221,7 @@ class MotionExecutor(Node):
         self._publish_vendor_pose(arm, pose)
         timeout = float(self.get_parameter('motion_timeout').value)
         deadline = time.monotonic() + timeout
-        target_position = [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z]
-        target_orientation = [
-            pose.pose.orientation.x,
-            pose.pose.orientation.y,
-            pose.pose.orientation.z,
-            pose.pose.orientation.w,
-        ]
+        target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
         with self._condition:
             while time.monotonic() < deadline:
                 current = self._current_poses.get(arm)
@@ -240,8 +239,17 @@ class MotionExecutor(Node):
     def _publish_vendor_pose(self, arm, pose):
         with self._condition:
             current = copy.deepcopy(self._current_poses)
+        target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
         payload = vendor_pose_payload(
             arm,
+            target_position,
+            target_orientation,
+            current,
+        )
+        self._vendor_pose_pub.publish(String(data=json.dumps(payload)))
+
+    def _tcp_to_eef_pose_values(self, arm, pose):
+        return tcp_target_to_eef(
             [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z],
             [
                 pose.pose.orientation.x,
@@ -249,9 +257,9 @@ class MotionExecutor(Node):
                 pose.pose.orientation.z,
                 pose.pose.orientation.w,
             ],
-            current,
+            self.get_parameter(f'{arm}_tcp_translation').value,
+            self.get_parameter(f'{arm}_tcp_quaternion').value,
         )
-        self._vendor_pose_pub.publish(String(data=json.dumps(payload)))
 
     def _execute_moveit(self, candidate):
         self._ensure_moveit()

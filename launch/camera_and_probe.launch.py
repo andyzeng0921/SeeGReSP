@@ -26,6 +26,13 @@ def generate_launch_description():
         ),
         Node(
             package='adaptive_object_grasping',
+            executable='robot_tf_broadcaster_node.py',
+            name='adaptive_grasp_robot_tf',
+            parameters=[str(config)],
+            output='screen',
+        ),
+        Node(
+            package='adaptive_object_grasping',
             executable='hardware_probe_node.py',
             name='adaptive_grasp_hardware_probe',
             parameters=[str(config)],
