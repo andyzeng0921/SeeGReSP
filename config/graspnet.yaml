@@ -17,6 +17,7 @@ graspnet_server:
     minimum_grasp_score: 0.25
     maximum_gripper_width: 0.095
     maximum_candidates: 20
+    inference_attempts: 3
     pregrasp_offset: 0.12
     approach_axis: 0
     tf_timeout: 0.2

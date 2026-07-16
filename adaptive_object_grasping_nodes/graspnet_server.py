@@ -121,6 +121,7 @@ class GraspNetServer(Node):
         self.declare_parameter('minimum_grasp_score', 0.25)
         self.declare_parameter('maximum_gripper_width', 0.10)
         self.declare_parameter('maximum_candidates', 20)
+        self.declare_parameter('inference_attempts', 3)
         self.declare_parameter('pregrasp_offset', 0.12)
         self.declare_parameter('approach_axis', 0)
         self.declare_parameter('tf_timeout', 0.2)
@@ -230,14 +231,18 @@ class GraspNetServer(Node):
             )
             with self._inference_lock:
                 backend = self._load_backend()
-                sampled_points, _ = sample_point_cloud(points, colors, backend.number_points)
-                rows = backend.infer(
-                    sampled_points,
-                    scene_points,
-                    float(self.get_parameter('collision_threshold').value),
-                    float(self.get_parameter('collision_voxel_size').value),
-                    int(self.get_parameter('maximum_candidates').value),
-                )
+                rows = np.empty((0, 17), dtype=np.float32)
+                for _ in range(max(1, int(self.get_parameter('inference_attempts').value))):
+                    sampled_points, _ = sample_point_cloud(points, colors, backend.number_points)
+                    rows = backend.infer(
+                        sampled_points,
+                        scene_points,
+                        float(self.get_parameter('collision_threshold').value),
+                        float(self.get_parameter('collision_voxel_size').value),
+                        int(self.get_parameter('maximum_candidates').value),
+                    )
+                    if len(rows):
+                        break
             candidates = self._make_candidates(rows, request, transform)
         except TransformException as exc:
             response.message = f'camera-to-base TF unavailable: {exc}'
