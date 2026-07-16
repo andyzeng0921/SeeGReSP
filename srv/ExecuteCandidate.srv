@@ -1,0 +1,5 @@
+adaptive_object_grasping/GraspCandidate candidate
+bool execute
+---
+bool success
+string message

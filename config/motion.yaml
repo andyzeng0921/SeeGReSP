@@ -1,0 +1,26 @@
+adaptive_grasp_motion_executor:
+  ros__parameters:
+    planning_backend: vendor_task_space
+    dry_run: true
+    allow_hardware_execution: false
+    require_hardware_ready: true
+    base_frame: Link_Zero_Point
+    topic_suffix: 0_283
+    workspace_minimum: [0.10, -0.75, 0.20]
+    workspace_maximum: [0.85, 0.75, 1.45]
+    motion_timeout: 12.0
+    position_tolerance: 0.025
+    orientation_tolerance: 0.15
+    maximum_gripper_width: 0.10
+    gripper_open_position: 0.0
+    gripper_closed_position: 330.0
+    gripper_wait: 1.0
+    lift_distance: 0.10
+    moveit_left_group: Left_Arm
+    moveit_right_group: Right_Arm
+    moveit_left_tip: Link_Left_Wrist_Lower_to_Gripper
+    moveit_right_tip: Link_Right_Wrist_Lower_to_Gripper
+    enable_pbvs_hardware_follow: false
+    pbvs_follow_backend: moveit_servo
+    moveit_servo_pose_topic: /servo_node/pose_target_cmds
+    pbvs_command_rate: 10.0
