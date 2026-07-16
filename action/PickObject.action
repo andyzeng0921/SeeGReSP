@@ -1,0 +1,15 @@
+int32 track_id
+string label
+string preferred_arm
+bool execute
+float32 maximum_tracking_time
+float32 required_stable_duration
+---
+bool success
+string message
+adaptive_object_grasping/GraspCandidate selected_grasp
+---
+string state
+string detail
+float32 target_motion
+float32 stable_elapsed

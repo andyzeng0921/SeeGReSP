@@ -1,0 +1,10 @@
+std_msgs/Header header
+int32 track_id
+string label
+string arm
+geometry_msgs/PoseStamped grasp_pose
+geometry_msgs/PoseStamped pregrasp_pose
+float32 score
+float32 required_width
+float32 grasp_depth
+float32 grasp_height

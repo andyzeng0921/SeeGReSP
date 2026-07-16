@@ -1,0 +1,11 @@
+std_msgs/Header header
+int32 track_id
+string label
+float32 confidence
+int32 bbox_x
+int32 bbox_y
+int32 bbox_width
+int32 bbox_height
+bool depth_valid
+geometry_msgs/Point position_camera
+float32 median_depth

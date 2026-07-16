@@ -1,0 +1,7 @@
+int32 track_id
+string label
+string preferred_arm
+---
+bool accepted
+string message
+adaptive_object_grasping/TrackedObject selected

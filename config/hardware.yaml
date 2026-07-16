@@ -1,0 +1,20 @@
+rgbd_shm_bridge:
+  ros__parameters:
+    vendor_python_path: /home/ubuntu/miniconda3/envs/robot_env/lib/python3.12/site-packages
+    color_topic: /head_camera/color/image_raw
+    depth_topic: /head_camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /head_camera/color/camera_info
+    optical_frame: rgbd_head_color_optical_frame
+    publish_rate: 60.0
+    maximum_frame_id_delta: 2
+
+adaptive_grasp_hardware_probe:
+  ros__parameters:
+    camera_info_topic: /head_camera/color/camera_info
+    joint_state_topic: /topic_arm_whole_body_and_gripper_current_joints_status_0_283
+    eef_pose_topic: /topic_arm_current_robot_eef_pose_0_283
+    base_frame: Link_Zero_Point
+    camera_frame: rgbd_head_color_optical_frame
+    left_tcp_frame: Link_Left_Wrist_Lower_to_Gripper
+    right_tcp_frame: Link_Right_Wrist_Lower_to_Gripper
+    maximum_data_age: 1.0

@@ -1,0 +1,6 @@
+adaptive_object_grasping/TrackedObject target
+string preferred_arm
+---
+bool success
+string message
+adaptive_object_grasping/GraspCandidate[] candidates
