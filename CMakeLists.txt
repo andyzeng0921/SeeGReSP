@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TrackedObject.msg"
   "msg/TrackedObjectArray.msg"
   "srv/EstimateGrasps.srv"
+  "srv/ExecuteCandidate.srv"
   "srv/ListObjects.srv"
   "srv/SelectObject.srv"
   DEPENDENCIES action_msgs geometry_msgs sensor_msgs std_msgs
@@ -25,8 +26,13 @@ ament_python_install_package(${PROJECT_NAME}_nodes)
 
 install(PROGRAMS
   scripts/hardware_probe_node.py
+  scripts/graspnet_server_node.py
+  scripts/graspnet_server_venv.sh
+  scripts/motion_executor_node.py
+  scripts/grasp_coordinator_node.py
   scripts/rgbd_shm_bridge_robot_env.sh
   scripts/rgbd_shm_bridge_node.py
+  scripts/pbvs_servo_node.py
   scripts/yolo_tracker_node.py
   scripts/yolo_tracker_venv.sh
   DESTINATION lib/${PROJECT_NAME}
@@ -36,9 +42,20 @@ install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY docs
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(PROGRAMS tools/install_ai_environment.sh tools/probe_hardware.sh
+  DESTINATION share/${PROJECT_NAME}/tools
+)
+
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(perception_core_test test/test_perception_core.py)
+  ament_add_pytest_test(pbvs_core_test test/test_pbvs_core.py)
+  ament_add_pytest_test(graspnet_core_test test/test_graspnet_core.py)
+  ament_add_pytest_test(motion_core_test test/test_motion_core.py)
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

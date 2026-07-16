@@ -84,8 +84,11 @@ class HardwareProbe(Node):
         checks = {}
         for key in ('camera_info', 'joint_state', 'eef_pose'):
             stamp = last_seen.get(key)
-            age = float('inf') if stamp is None else (now - stamp).nanoseconds / 1e9
-            checks[key] = {'ok': age <= max_age, 'age_seconds': round(age, 3)}
+            age = None if stamp is None else (now - stamp).nanoseconds / 1e9
+            checks[key] = {
+                'ok': age is not None and age <= max_age,
+                'age_seconds': None if age is None else round(age, 3),
+            }
         checks['camera_intrinsics'] = {
             'ok': bool(camera_info and camera_info.k[0] > 0.0 and camera_info.k[4] > 0.0),
             'fx': 0.0 if camera_info is None else camera_info.k[0],
