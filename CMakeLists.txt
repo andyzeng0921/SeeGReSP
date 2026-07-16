@@ -27,12 +27,19 @@ install(PROGRAMS
   scripts/hardware_probe_node.py
   scripts/rgbd_shm_bridge_robot_env.sh
   scripts/rgbd_shm_bridge_node.py
+  scripts/yolo_tracker_node.py
+  scripts/yolo_tracker_venv.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(perception_core_test test/test_perception_core.py)
+endif()
 
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()
