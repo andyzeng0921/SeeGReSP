@@ -64,7 +64,7 @@ else
 fi
 "$ENV_DIR/bin/python" -m pip install \
   ultralytics open3d 'transforms3d>=0.4.2' trimesh tqdm scipy cvxopt dill \
-  h5py scikit-learn scikit-image pywavefront
+  h5py scikit-learn scikit-image pywavefront ninja gdown grasp_nms
 # graspnetAPI 1.2.11 pins NumPy 1.20.3 and transforms3d 0.3.1, neither of
 # which builds on ROS Jazzy's Python 3.12. Its runtime works with the compatible
 # versions installed above; avoid forcing those obsolete package metadata pins.
@@ -88,12 +88,9 @@ Everything is stored below this ROS package:
   third_party/pip-cache
   models/yolo/yolo11n-seg.pt
 
-GraspNet remains a separate, noncommercial-research dependency:
-  1. Review and accept https://github.com/graspnet/graspnet-baseline/blob/master/LICENSE
-  2. Clone the official repository to third_party/graspnet-baseline
-  3. Build its pointnet2 extension with this environment's Python
-  4. Put the official RealSense checkpoint at
-     models/graspnet/checkpoint-rs.tar
+GraspNet is a separate noncommercial-research dependency. Review its license,
+then install and verify it with:
+  GRASPNET_LICENSE_ACCEPTED=1 tools/install_graspnet.sh
 
 Do not install these packages into robot_env; that environment runs the vendor services.
 EOF

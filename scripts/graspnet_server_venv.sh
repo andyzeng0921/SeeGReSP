@@ -11,5 +11,7 @@ if [ ! -f "$SOURCE_ROOT/package.xml" ]; then
 fi
 PACKAGE_ROOT="${ADAPTIVE_GRASP_PACKAGE_ROOT:-$SOURCE_ROOT}"
 PYTHON_BIN="${ADAPTIVE_GRASP_PYTHON:-$PACKAGE_ROOT/third_party/venv/bin/python}"
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 cd "$PACKAGE_ROOT"
 exec "$PYTHON_BIN" "$SCRIPT_DIR/graspnet_server_node.py" "$@"

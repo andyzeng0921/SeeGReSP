@@ -48,7 +48,10 @@ install(DIRECTORY docs
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(PROGRAMS tools/install_ai_environment.sh tools/probe_hardware.sh
+install(PROGRAMS
+  tools/install_ai_environment.sh
+  tools/install_graspnet.sh
+  tools/probe_hardware.sh
   DESTINATION share/${PROJECT_NAME}/tools
 )
 
