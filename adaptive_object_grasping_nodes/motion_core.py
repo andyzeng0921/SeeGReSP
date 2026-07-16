@@ -79,3 +79,20 @@ def vendor_pose_payload(active_arm, position, orientation, current_poses):
 def width_to_gripper_position(width, maximum_width, open_position, closed_position):
     ratio = np.clip(float(width) / float(maximum_width), 0.0, 1.0)
     return float(closed_position + ratio * (open_position - closed_position))
+
+
+def compose_vendor_rrt_target(left_body, right_body):
+    if len(left_body) != 11 or len(right_body) != 11:
+        raise ValueError('vendor IK must return 11 left and 11 right body joints')
+    return [float(value) for value in left_body] + [float(value) for value in right_body[4:]]
+
+
+def validate_vendor_trajectory(trajectory):
+    if not isinstance(trajectory, list) or len(trajectory) < 2:
+        raise ValueError('vendor RRT returned an empty or too-short trajectory')
+    if any(not isinstance(point, list) or len(point) != 18 for point in trajectory):
+        raise ValueError('vendor RRT trajectory points must contain 18 joints')
+    array = np.asarray(trajectory, dtype=np.float64)
+    if not np.all(np.isfinite(array)):
+        raise ValueError('vendor RRT trajectory contains non-finite values')
+    return array.tolist()

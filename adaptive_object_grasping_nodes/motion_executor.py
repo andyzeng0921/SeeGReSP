@@ -5,6 +5,7 @@ import time
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from autolife_robot_srvs.srv import SetString
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -12,19 +13,22 @@ from std_msgs.msg import String
 
 from adaptive_object_grasping.srv import ExecuteCandidate
 from adaptive_object_grasping_nodes.motion_core import (
+    compose_vendor_rrt_target,
     parse_eef_feedback,
     pose_error,
     validate_pose,
+    validate_vendor_trajectory,
     vendor_pose_payload,
     width_to_gripper_position,
 )
 from adaptive_object_grasping_nodes.robot_geometry_core import tcp_target_to_eef
+from adaptive_object_grasping_nodes.robot_geometry_core import parse_robot_joint_feedback
 
 
 class MotionExecutor(Node):
     def __init__(self):
         super().__init__('adaptive_grasp_motion_executor')
-        self.declare_parameter('planning_backend', 'vendor_task_space')
+        self.declare_parameter('planning_backend', 'vendor_rrt')
         self.declare_parameter('dry_run', True)
         self.declare_parameter('allow_hardware_execution', False)
         self.declare_parameter('require_hardware_ready', True)
@@ -52,10 +56,17 @@ class MotionExecutor(Node):
         self.declare_parameter('pbvs_follow_backend', 'moveit_servo')
         self.declare_parameter('moveit_servo_pose_topic', '/servo_node/pose_target_cmds')
         self.declare_parameter('pbvs_command_rate', 10.0)
+        self.declare_parameter('vendor_service_timeout', 15.0)
+        self.declare_parameter('vendor_rrt_max_step_size', 0.06)
+        self.declare_parameter('vendor_trajectory_duration', 4.0)
+        self.declare_parameter('vendor_excluded_joints', ['Joint_Ankle', 'Joint_Knee'])
+        self.declare_parameter('inactive_arm_position_tolerance', 0.06)
+        self.declare_parameter('inactive_arm_orientation_tolerance', 0.30)
 
         suffix = str(self.get_parameter('topic_suffix').value)
         self._condition = threading.Condition()
         self._current_poses = {}
+        self._current_joints = None
         self._hardware_ready = False
         self._hardware_status_time = 0.0
         self._selected_arm = 'left'
@@ -70,6 +81,18 @@ class MotionExecutor(Node):
         self._gripper_pub = self.create_publisher(
             String, f'/topic_arm_gripper_target_joints_position_{suffix}', 10
         )
+        self._vendor_trajectory_pub = self.create_publisher(
+            String, f'/topic_arm_move_joints_trajectory_{suffix}', 10
+        )
+        self._ik_client = self.create_client(
+            SetString, f'/service_arm_robot_inverse_kinematics_{suffix}'
+        )
+        self._fk_client = self.create_client(
+            SetString, f'/service_arm_robot_forward_kinematics_{suffix}'
+        )
+        self._rrt_client = self.create_client(
+            SetString, f'/service_arm_whole_body_joint_motion_planning_{suffix}'
+        )
         self._servo_pose_pub = self.create_publisher(
             PoseStamped, str(self.get_parameter('moveit_servo_pose_topic').value), 10
         )
@@ -78,6 +101,13 @@ class MotionExecutor(Node):
             String,
             f'/topic_arm_current_robot_eef_pose_{suffix}',
             self._on_eef,
+            10,
+            callback_group=callback_group,
+        )
+        self.create_subscription(
+            String,
+            f'/topic_arm_whole_body_and_gripper_current_joints_status_{suffix}',
+            self._on_joints,
             10,
             callback_group=callback_group,
         )
@@ -104,6 +134,26 @@ class MotionExecutor(Node):
                 self._condition.notify_all()
         except Exception as exc:
             self.get_logger().warning(f'EEF feedback rejected: {exc}')
+
+    def _on_joints(self, message):
+        names = {
+            'leg_waist': ['Joint_Ankle', 'Joint_Knee', 'Joint_Waist_Pitch', 'Joint_Waist_Yaw'],
+            'left_arm': ['Joint_Left_Shoulder_Inner', 'Joint_Left_Shoulder_Outer', 'Joint_Left_UpperArm',
+                         'Joint_Left_Elbow', 'Joint_Left_Forearm', 'Joint_Left_Wrist_Upper', 'Joint_Left_Wrist_Lower'],
+            'right_arm': ['Joint_Right_Shoulder_Inner', 'Joint_Right_Shoulder_Outer', 'Joint_Right_UpperArm',
+                          'Joint_Right_Elbow', 'Joint_Right_Forearm', 'Joint_Right_Wrist_Upper', 'Joint_Right_Wrist_Lower'],
+            'neck': ['Joint_Neck_Roll', 'Joint_Neck_Pitch', 'Joint_Neck_Yaw'],
+        }
+        try:
+            parsed = parse_robot_joint_feedback(message.data, names)
+            with self._condition:
+                self._current_joints = {
+                    group: [parsed[name] for name in joint_names]
+                    for group, joint_names in names.items()
+                }
+                self._condition.notify_all()
+        except Exception as exc:
+            self.get_logger().warning(f'joint feedback rejected: {exc}')
 
     def _on_hardware(self, message):
         try:
@@ -150,6 +200,8 @@ class MotionExecutor(Node):
             backend = str(self.get_parameter('planning_backend').value)
             if backend == 'moveit_py':
                 self._execute_moveit(candidate)
+            elif backend == 'vendor_rrt':
+                self._execute_vendor_rrt(candidate)
             elif backend == 'vendor_task_space':
                 self._execute_vendor(candidate)
             else:
@@ -215,6 +267,145 @@ class MotionExecutor(Node):
         lift.pose.position.z += float(self.get_parameter('lift_distance').value)
         self._move_vendor_and_wait(arm, lift, 'lift')
         self._publish_status('completed', arm)
+
+    def _execute_vendor_rrt(self, candidate):
+        arm = candidate.arm
+        self._publish_status('opening', arm)
+        self._command_gripper(arm, float(self.get_parameter('gripper_open_position').value))
+        time.sleep(float(self.get_parameter('gripper_wait').value))
+        self._move_rrt_and_wait(arm, candidate.pregrasp_pose, 'pregrasp')
+        self._move_rrt_and_wait(arm, candidate.grasp_pose, 'grasp')
+        self._publish_status('closing', arm)
+        position = width_to_gripper_position(
+            candidate.required_width,
+            float(self.get_parameter('maximum_gripper_width').value),
+            float(self.get_parameter('gripper_open_position').value),
+            float(self.get_parameter('gripper_closed_position').value),
+        )
+        self._command_gripper(arm, position)
+        time.sleep(float(self.get_parameter('gripper_wait').value))
+        lift = copy.deepcopy(candidate.grasp_pose)
+        lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        self._move_rrt_and_wait(arm, lift, 'lift')
+        self._publish_status('completed', arm)
+
+    def _move_rrt_and_wait(self, arm, pose, stage):
+        self._publish_status(f'ik_{stage}', arm)
+        target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
+        with self._condition:
+            current_poses = copy.deepcopy(self._current_poses)
+            current_joints = copy.deepcopy(self._current_joints)
+        if not all(name in current_poses for name in ('left', 'right')) or current_joints is None:
+            raise RuntimeError('current dual-arm pose and joint feedback are required for vendor planning')
+
+        ik_payload = vendor_pose_payload(
+            arm, target_position, target_orientation, current_poses
+        )
+        ik = self._call_vendor_service(self._ik_client, ik_payload, 'IK')
+        left_body = [float(value) for value in ik['left_arm_body_target_joints']]
+        right_body = [float(value) for value in ik['right_arm_body_target_joints']]
+        neck_body = current_joints['leg_waist'] + current_joints['neck']
+        fk = self._call_vendor_service(
+            self._fk_client,
+            {
+                'left_arm_body_joints_deg': left_body,
+                'right_arm_body_joints_deg': right_body,
+                'neck_body_joints_deg': neck_body,
+            },
+            'FK',
+        )
+        self._validate_fk_solution(arm, fk, target_position, target_orientation, current_poses)
+
+        q_end = compose_vendor_rrt_target(left_body, right_body)
+        self._publish_status(f'planning_{stage}', arm)
+        planned = self._call_vendor_service(
+            self._rrt_client,
+            {
+                'max_step_size': float(self.get_parameter('vendor_rrt_max_step_size').value),
+                'q_end': q_end,
+            },
+            'RRT',
+        )
+        trajectory = validate_vendor_trajectory(planned.get('trajectory'))
+
+        self._publish_status(f'executing_{stage}', arm)
+        self._vendor_trajectory_pub.publish(String(data=json.dumps({
+            'traj_deg': trajectory,
+            'duration': float(self.get_parameter('vendor_trajectory_duration').value),
+            'excluded_joints_name': list(self.get_parameter('vendor_excluded_joints').value),
+            'position_tolerance': 2.0,
+        })))
+        self._wait_for_eef(arm, target_position, target_orientation, stage)
+
+    def _call_vendor_service(self, client, payload, label):
+        timeout = float(self.get_parameter('vendor_service_timeout').value)
+        if not client.wait_for_service(timeout_sec=min(timeout, 2.0)):
+            raise RuntimeError(f'vendor {label} service is unavailable')
+        request = SetString.Request()
+        request.data = json.dumps(payload)
+        future = client.call_async(request)
+        deadline = time.monotonic() + timeout
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            raise TimeoutError(f'vendor {label} service timed out after {timeout:.1f}s')
+        response = future.result()
+        if response is None or not response.success:
+            detail = 'no response' if response is None else response.result
+            raise RuntimeError(f'vendor {label} failed: {detail}')
+        try:
+            return json.loads(response.result)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f'vendor {label} returned invalid JSON') from exc
+
+    def _validate_fk_solution(self, arm, fk, target_position, target_orientation, current_poses):
+        selected = fk[f'{arm}_eef_pose']
+        selected_pose = {
+            'position': selected['position'],
+            'orientation': selected['rotation'],
+        }
+        position_error, angle_error = pose_error(selected_pose, target_position, target_orientation)
+        if position_error > float(self.get_parameter('position_tolerance').value) or angle_error > float(
+            self.get_parameter('orientation_tolerance').value
+        ):
+            raise RuntimeError(
+                f'vendor FK rejected IK for {arm}: position_error={position_error:.4f}, '
+                f'orientation_error={angle_error:.4f}'
+            )
+        inactive = 'right' if arm == 'left' else 'left'
+        inactive_fk = fk[f'{inactive}_eef_pose']
+        inactive_pose = {
+            'position': inactive_fk['position'],
+            'orientation': inactive_fk['rotation'],
+        }
+        inactive_position_error, inactive_angle_error = pose_error(
+            inactive_pose,
+            current_poses[inactive]['position'],
+            current_poses[inactive]['orientation'],
+        )
+        if inactive_position_error > float(self.get_parameter('inactive_arm_position_tolerance').value) or inactive_angle_error > float(
+            self.get_parameter('inactive_arm_orientation_tolerance').value
+        ):
+            raise RuntimeError(
+                f'vendor IK moves inactive {inactive} arm too far: '
+                f'position_error={inactive_position_error:.4f}, '
+                f'orientation_error={inactive_angle_error:.4f}'
+            )
+
+    def _wait_for_eef(self, arm, target_position, target_orientation, stage):
+        timeout = float(self.get_parameter('motion_timeout').value)
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while time.monotonic() < deadline:
+                current = self._current_poses.get(arm)
+                if current is not None:
+                    position_error, angle_error = pose_error(current, target_position, target_orientation)
+                    if position_error <= float(self.get_parameter('position_tolerance').value) and angle_error <= float(
+                        self.get_parameter('orientation_tolerance').value
+                    ):
+                        return
+                self._condition.wait(timeout=0.1)
+        raise TimeoutError(f'{stage} pose did not converge within {timeout:.1f}s')
 
     def _move_vendor_and_wait(self, arm, pose, stage):
         self._publish_status(stage, arm)

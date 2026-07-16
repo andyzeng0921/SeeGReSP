@@ -2,9 +2,11 @@ import json
 import math
 
 from adaptive_object_grasping_nodes.motion_core import (
+    compose_vendor_rrt_target,
     parse_eef_feedback,
     pose_error,
     validate_pose,
+    validate_vendor_trajectory,
     vendor_pose_payload,
     width_to_gripper_position,
 )
@@ -47,3 +49,11 @@ def test_gripper_mapping_opens_for_wider_object():
     narrow = width_to_gripper_position(0.02, 0.10, 0.0, 330.0)
     wide = width_to_gripper_position(0.08, 0.10, 0.0, 330.0)
     assert wide < narrow
+
+
+def test_vendor_rrt_target_and_trajectory_contract():
+    left = list(range(11))
+    right = list(range(20, 31))
+    target = compose_vendor_rrt_target(left, right)
+    assert target == left + right[4:]
+    assert validate_vendor_trajectory([target, [value + 1 for value in target]])[0] == target

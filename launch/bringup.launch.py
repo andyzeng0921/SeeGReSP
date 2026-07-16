@@ -30,7 +30,7 @@ def generate_launch_description():
         ),
         Node(
             package='adaptive_object_grasping',
-            executable='motion_executor_node.py',
+            executable='motion_executor_robot_env.sh',
             name='adaptive_grasp_motion_executor',
             parameters=[str(config / 'motion.yaml')],
             output='screen',

@@ -29,6 +29,7 @@ install(PROGRAMS
   scripts/graspnet_server_node.py
   scripts/graspnet_server_venv.sh
   scripts/motion_executor_node.py
+  scripts/motion_executor_robot_env.sh
   scripts/grasp_coordinator_node.py
   scripts/rgbd_shm_bridge_robot_env.sh
   scripts/rgbd_shm_bridge_node.py
