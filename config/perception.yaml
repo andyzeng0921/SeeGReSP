@@ -3,7 +3,7 @@ yolo_object_tracker:
     color_topic: /head_camera/color/image_raw
     depth_topic: /head_camera/aligned_depth_to_color/image_raw
     camera_info_topic: /head_camera/color/camera_info
-    model: yolo11n-seg.pt
+    model: models/yolo/yolo11n-seg.pt
     tracker: bytetrack.yaml
     device: '0'
     image_size: 640

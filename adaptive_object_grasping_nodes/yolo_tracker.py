@@ -28,7 +28,7 @@ class YoloTracker(Node):
         self.declare_parameter('color_topic', '/head_camera/color/image_raw')
         self.declare_parameter('depth_topic', '/head_camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic', '/head_camera/color/camera_info')
-        self.declare_parameter('model', 'yolo11n-seg.pt')
+        self.declare_parameter('model', 'models/yolo/yolo11n-seg.pt')
         self.declare_parameter('tracker', 'bytetrack.yaml')
         self.declare_parameter('device', '0')
         self.declare_parameter('image_size', 640)

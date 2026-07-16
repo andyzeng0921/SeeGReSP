@@ -57,6 +57,11 @@ colcon test-result --test-result-base build/adaptive_object_grasping --verbose
 bash /home/ubuntu/ros2_ws/src/adaptive_object_grasping/tools/install_ai_environment.sh
 ```
 
+安装内容统一保存在功能包内部：`third_party/venv`、`models/yolo`、
+`third_party/graspnet-baseline` 和 `models/graspnet`。复制整个功能包后重新编译即可迁移；
+不同 CPU、系统或 CUDA 版本的机器人应在目标机器上重新运行安装脚本。详细目录说明见
+`docs/PORTABLE_RUNTIME.md`。
+
 然后按脚本末尾提示，在接受官方非商业研究许可证后，单独安装
 `graspnet-baseline`、编译 PointNet2 扩展并放置 checkpoint。
 

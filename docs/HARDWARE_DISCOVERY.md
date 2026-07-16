@@ -57,9 +57,9 @@ Discovery date: 2026-07-16
 - MoveIt 2 and `moveit_py` were not installed. The SRDF exists, but controller,
   kinematics, joint-state bridge and planning-pipeline configuration are still
   required before selecting `planning_backend=moveit_py`.
-- `ultralytics`, `graspnetAPI`, Open3D and an NVIDIA CUDA build of PyTorch were not
-  installed. The vendor `robot_env` currently has an XPU PyTorch build and must
-  not be modified. Use the separate environment created by
+- The vendor `robot_env` currently has an XPU PyTorch build and must not be
+  modified. Install `ultralytics`, `graspnetAPI`, Open3D and the NVIDIA CUDA
+  PyTorch build into this package's `third_party/venv` by running
   `tools/install_ai_environment.sh`.
 - The official GraspNet baseline license permits noncommercial research use only.
   Its repository and checkpoint are intentionally not copied into this package.

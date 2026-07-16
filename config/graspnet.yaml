@@ -4,8 +4,8 @@ graspnet_server:
     depth_topic: /head_camera/aligned_depth_to_color/image_raw
     camera_info_topic: /head_camera/color/camera_info
     base_frame: Link_Zero_Point
-    graspnet_root: /home/ubuntu/open_source/graspnet-baseline
-    checkpoint_path: /home/ubuntu/models/graspnet/checkpoint-rs.tar
+    graspnet_root: third_party/graspnet-baseline
+    checkpoint_path: models/graspnet/checkpoint-rs.tar
     device: cuda:0
     number_points: 20000
     number_views: 300
