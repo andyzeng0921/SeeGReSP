@@ -35,7 +35,7 @@ class MotionExecutor(Node):
         self.declare_parameter('position_tolerance', 0.025)
         self.declare_parameter('orientation_tolerance', 0.15)
         self.declare_parameter('maximum_gripper_width', 0.10)
-        self.declare_parameter('gripper_open_position', 0.0)
+        self.declare_parameter('gripper_open_position', 10.0)
         self.declare_parameter('gripper_closed_position', 330.0)
         self.declare_parameter('gripper_wait', 1.0)
         self.declare_parameter('lift_distance', 0.10)

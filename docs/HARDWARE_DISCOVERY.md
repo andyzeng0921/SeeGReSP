@@ -52,27 +52,56 @@ Discovery date: 2026-07-16
   - gripper position: `/topic_arm_gripper_target_joints_position_0_283`
   - gripper torque: `/topic_arm_gripper_target_joints_torque_0_283`
 
+- The vendor processes use ROS domain 0, Cyclone DDS, and a loopback-only network
+  interface. `camera_and_probe.launch.py` now applies the matching DDS settings
+  and raises the automatic participant-index search limit for the robot's dense
+  local ROS graph.
+- Live joint and gripper feedback was captured. It is a `std_msgs/msg/String`
+  JSON object whose arm arrays contain seven joint positions in degrees and whose
+  gripper states contain `position`, `speed`, `torque`, and `temperature`.
+- Live EEF feedback was captured. Its JSON fields are `left_eef_pose`,
+  `right_eef_pose`, and `head_pose`; each EEF pose contains a position in metres
+  and an `[x, y, z, w]` quaternion in the robot frame.
+- The vendor EEF command is a JSON string with `pos_left_in_robot`,
+  `quat_left_in_robot`, `pos_right_in_robot`, and `quat_right_in_robot` fields.
+  The gripper position command uses `left_gripper_target_joints_position` and
+  `right_gripper_target_joints_position` arrays.
+- The configured gripper range is 10 through 360 (open through closed). The
+  package uses 10 as open and a conservative 330 as closed.
+- Vendor IK, FK, and whole-body RRT planning services are active as
+  `autolife_robot_srvs/srv/SetString` services. They provide an initial planning
+  route while a complete MoveIt configuration is being prepared.
+- The installed URDF locates `Link_Camera_Head_Forehead` at translation
+  `[0.0830747060, 0.0019568093, -0.1056439492]` and RPY
+  `[0, 1.1868238914, 0.0000819235]` from its neck parent. The SDK additionally
+  applies a `[0, -1, 4]` degree head encoder offset and a nominal zero-translation
+  optical-axis rotation.
+
 ## Missing or not yet safe to infer
 
-- The active robot processes did not expose arm feedback or a complete TF tree to
-  the isolated SSH ROS CLI during discovery. Topic names are known, but live
-  payloads still need to be captured while the arm ROS bridge is discoverable.
 - The URDF contains `Link_Camera_Head_Forehead`, which is the likely physical
-  mounting link for the RGB-D camera. It does not define the RealSense optical
-  frame. The transform from that physical link to
-  `rgbd_head_color_optical_frame` must be calibrated or obtained from the vendor;
-  the package deliberately does not guess it.
+  mounting link for the RGB-D camera. It and the SDK's nominal axis conversion
+  allow a provisional transform to be reconstructed, but neither defines a
+  measured RealSense color optical extrinsic. The live TF tree currently contains
+  navigation and lidar frames only. The transform to
+  `rgbd_head_color_optical_frame` therefore still requires hand-eye calibration
+  or a vendor calibration record; the package deliberately does not guess it.
 - The URDF tip links are wrist/gripper mounting links, not a calibrated grasp TCP.
-  Finger-centre TCP frames must be added after hand-eye/TCP calibration.
+  The SRDF has no end-effector entries and the live TF tree has no gripper frames.
+  Finger-centre `left_grasp_tcp` and `right_grasp_tcp` frames must be added after
+  TCP calibration. Their intentionally absent transforms keep the hardware gate
+  locked.
 - MoveIt 2 and `moveit_py` were not installed. The SRDF exists, but controller,
   kinematics, joint-state bridge and planning-pipeline configuration are still
   required before selecting `planning_backend=moveit_py`.
-- The vendor `robot_env` currently has an XPU PyTorch build and must not be
-  modified. Install `ultralytics`, `graspnetAPI`, Open3D and the NVIDIA CUDA
-  PyTorch build into this package's `third_party/venv` by running
-  `tools/install_ai_environment.sh`.
+- No `ros2_control` controller interface was found. A MoveIt deployment will also
+  need adapters between standard joint/trajectory messages and the vendor JSON
+  string interfaces.
+- The package-local environment contains `graspnetAPI`, but the official
+  `graspnet-baseline` source and RealSense checkpoint are not present.
 - The official GraspNet baseline license permits noncommercial research use only.
-  Its repository and checkpoint are intentionally not copied into this package.
+  Its repository and checkpoint are intentionally not copied into this package
+  until the user explicitly accepts that license.
 
 ## Safety consequence
 
@@ -80,3 +109,8 @@ The default configuration keeps `dry_run=true`,
 `allow_hardware_execution=false`, and PBVS hardware follow disabled. The hardware
 probe requires fresh RGB-D intrinsics, arm joint feedback, EEF feedback, and all
 three base transforms. A failed check keeps the execution adapter locked.
+
+A live read-only probe confirmed that camera info, joint feedback, EEF feedback,
+and camera intrinsics all pass. It correctly remains locked because
+`rgbd_head_color_optical_frame`, `left_grasp_tcp`, and `right_grasp_tcp` do not yet
+have transforms to `Link_Zero_Point`.

@@ -12,7 +12,7 @@ adaptive_grasp_motion_executor:
     position_tolerance: 0.025
     orientation_tolerance: 0.15
     maximum_gripper_width: 0.10
-    gripper_open_position: 0.0
+    gripper_open_position: 10.0
     gripper_closed_position: 330.0
     gripper_wait: 1.0
     lift_distance: 0.10

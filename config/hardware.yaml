@@ -15,6 +15,6 @@ adaptive_grasp_hardware_probe:
     eef_pose_topic: /topic_arm_current_robot_eef_pose_0_283
     base_frame: Link_Zero_Point
     camera_frame: rgbd_head_color_optical_frame
-    left_tcp_frame: Link_Left_Wrist_Lower_to_Gripper
-    right_tcp_frame: Link_Right_Wrist_Lower_to_Gripper
+    left_tcp_frame: left_grasp_tcp
+    right_tcp_frame: right_grasp_tcp
     maximum_data_age: 1.0

@@ -26,8 +26,8 @@ class HardwareProbe(Node):
         )
         self.declare_parameter('base_frame', 'Link_Zero_Point')
         self.declare_parameter('camera_frame', 'rgbd_head_color_optical_frame')
-        self.declare_parameter('left_tcp_frame', 'Link_Left_Wrist_Lower_to_Gripper')
-        self.declare_parameter('right_tcp_frame', 'Link_Right_Wrist_Lower_to_Gripper')
+        self.declare_parameter('left_tcp_frame', 'left_grasp_tcp')
+        self.declare_parameter('right_tcp_frame', 'right_grasp_tcp')
         self.declare_parameter('maximum_data_age', 1.0)
 
         self._lock = threading.Lock()
