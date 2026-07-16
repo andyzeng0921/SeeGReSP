@@ -12,6 +12,7 @@ from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from adaptive_object_grasping.msg import TrackedObject
+from adaptive_object_grasping_nodes.motion_core import parse_eef_feedback
 from adaptive_object_grasping_nodes.pbvs_core import (
     StabilityWindow,
     limited_low_pass,
@@ -79,16 +80,14 @@ class PbvsServo(Node):
 
     def _on_eef_pose(self, message):
         try:
-            data = json.loads(message.data)
-            parsed = {}
-            for arm in ('left', 'right'):
-                position = data.get(f'pos_{arm}_in_robot')
-                orientation = data.get(f'quat_{arm}_in_robot')
-                if len(position or []) == 3 and len(orientation or []) == 4:
-                    parsed[arm] = (
-                        np.asarray(position, dtype=np.float64),
-                        np.asarray(orientation, dtype=np.float64),
-                    )
+            feedback = parse_eef_feedback(message.data)
+            parsed = {
+                arm: (
+                    np.asarray(pose['position'], dtype=np.float64),
+                    np.asarray(pose['orientation'], dtype=np.float64),
+                )
+                for arm, pose in feedback.items()
+            }
             with self._lock:
                 self._current_eef.update(parsed)
         except Exception as exc:
