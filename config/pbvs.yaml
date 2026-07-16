@@ -1,0 +1,11 @@
+pbvs_target_servo:
+  ros__parameters:
+    base_frame: Link_Zero_Point
+    eef_pose_topic: /topic_arm_current_robot_eef_pose_0_283
+    required_stable_duration: 1.5
+    stable_motion_threshold: 0.012
+    maximum_follow_distance: 0.25
+    maximum_target_age: 0.5
+    maximum_servo_speed: 0.12
+    filter_alpha: 0.35
+    tf_timeout: 0.1
