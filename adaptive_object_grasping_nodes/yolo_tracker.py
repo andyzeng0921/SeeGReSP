@@ -4,7 +4,6 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
@@ -38,7 +37,7 @@ class YoloTracker(Node):
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('minimum_depth', 0.15)
         self.declare_parameter('maximum_depth', 2.5)
-        self.declare_parameter('allowed_classes', Parameter.Type.STRING_ARRAY)
+        self.declare_parameter('allowed_classes', ['*'])
 
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -189,6 +188,8 @@ class YoloTracker(Node):
         if result.masks is not None and result.masks.data is not None:
             masks = result.masks.data.detach().cpu().numpy()
         allowed = {str(value).lower() for value in self.get_parameter('allowed_classes').value}
+        if '*' in allowed:
+            allowed.clear()
         names = result.names
         messages = []
         for index, (box, class_id, score, track_id) in enumerate(

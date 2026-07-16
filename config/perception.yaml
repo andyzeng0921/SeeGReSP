@@ -13,4 +13,4 @@ yolo_object_tracker:
     depth_scale: 0.001
     minimum_depth: 0.15
     maximum_depth: 2.5
-    allowed_classes: []
+    allowed_classes: ['*']

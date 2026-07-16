@@ -36,6 +36,10 @@ depth_scale=0.001
 /head_camera/color/camera_info
 ```
 
+2026-07-16 实机验证结果：包内 PyTorch 2.11.0+cu128 已识别 RTX 4090，
+Ultralytics 8.4.96 与 Open3D 0.19.0 可正常导入；真实头部画面中 YOLO11 分割跟踪
+识别到两只 `bottle`，跟踪 ID 为 1、2，深度约为 0.56 m、0.54 m。
+
 ## 编译与测试
 
 ```bash

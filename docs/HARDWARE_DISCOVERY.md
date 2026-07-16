@@ -26,6 +26,16 @@ Discovery date: 2026-07-16
   - `/camera_intrinsics_struct_rgbd_head_color`
   - `/camera_intrinsics_struct_rgbd_head_depth`
 
+- Package-local AI runtime verified on the robot:
+
+  - PyTorch `2.11.0+cu128`, CUDA available on the RTX 4090
+  - torchvision `0.26.0+cu128`
+  - Ultralytics `8.4.96`
+  - Open3D `0.19.0`
+  - graspnetAPI `1.2.11` with Python-3.12-compatible dependency overrides
+  - YOLO11 segmentation/tracking detected two bottles in a live RGB-D frame,
+    both with valid median depth and camera-frame 3D positions
+
 - Robot model: Autolife S1 v2.2. The installed URDF/SRDF defines two 7-DoF
   groups named `Left_Arm` and `Right_Arm`.
 - Model base and arm-tip links:

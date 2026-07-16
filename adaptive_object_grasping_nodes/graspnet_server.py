@@ -1,6 +1,9 @@
+import importlib
+import importlib.metadata
 import os
 import sys
 import threading
+import types
 
 import numpy as np
 import rclpy
@@ -23,6 +26,20 @@ from adaptive_object_grasping_nodes.graspnet_core import (
 from adaptive_object_grasping_nodes.perception_core import CameraIntrinsics, image_buffer_to_array
 
 
+def load_grasp_group_type():
+    """Load GraspGroup without importing graspnetAPI's optional evaluation stack."""
+    package_name = 'graspnetAPI'
+    if package_name not in sys.modules:
+        package_root = importlib.metadata.distribution(package_name).locate_file(package_name)
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(package_root)]
+        package.__package__ = package_name
+        sys.modules[package_name] = package
+    grasp_group_type = importlib.import_module(f'{package_name}.grasp').GraspGroup
+    setattr(sys.modules[package_name], 'GraspGroup', grasp_group_type)
+    return grasp_group_type
+
+
 class OfficialGraspNetBackend:
     """Thin adapter around a separately installed official graspnet-baseline checkout."""
 
@@ -37,11 +54,10 @@ class OfficialGraspNetBackend:
                 sys.path.insert(0, path)
         import torch
         from graspnet import GraspNet, pred_decode
-        from graspnetAPI import GraspGroup
 
         self._torch = torch
         self._pred_decode = pred_decode
-        self._grasp_group_type = GraspGroup
+        self._grasp_group_type = load_grasp_group_type()
         self._device = torch.device(device)
         self._number_points = int(number_points)
         self._net = GraspNet(
