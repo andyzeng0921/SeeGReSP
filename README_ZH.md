@@ -79,6 +79,31 @@ source /home/ubuntu/ros2_ws/install/setup.bash
 ros2 launch adaptive_object_grasping bringup.launch.py
 ```
 
+### 可视化运行效果
+
+启动完整功能时会同时启动 `adaptive_grasp_visualizer`，它只订阅现有话题，不会控制机械臂。常用输出：
+
+- `/adaptive_grasp/visualization_image`：相机画面叠加 YOLO 目标框、track id、深度、选中目标、GraspNet 候选数量和运动状态。
+- `/adaptive_grasp/grasp_markers`：RViz MarkerArray，显示 GraspNet 抓取点、预抓取到抓取的连线、候选编号、左右臂颜色区分。
+
+只启动可视化节点：
+
+```bash
+ros2 launch adaptive_object_grasping visualization.launch.py
+```
+
+同时打开 RViz：
+
+```bash
+ros2 launch adaptive_object_grasping visualization.launch.py rviz:=true
+```
+
+如果只想看图像叠加，也可以用：
+
+```bash
+ros2 run rqt_image_view rqt_image_view /adaptive_grasp/visualization_image
+```
+
 默认不会控制机械臂。先检查硬件门：
 
 ```bash

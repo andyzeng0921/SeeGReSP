@@ -1,0 +1,15 @@
+adaptive_grasp_visualizer:
+  ros__parameters:
+    color_topic: /head_camera/color/image_raw
+    objects_topic: tracked_objects
+    selected_topic: selected_object
+    candidates_topic: grasp_candidates
+    status_topic: motion_execution_status
+    overlay_topic: /adaptive_grasp/visualization_image
+    marker_topic: /adaptive_grasp/grasp_markers
+    draw_all_objects: true
+    maximum_markers: 20
+    marker_lifetime: 1.5
+    gripper_width_scale: 1.0
+    axis_length: 0.08
+    line_width: 0.01

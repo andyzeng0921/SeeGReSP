@@ -8,6 +8,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/PickObject.action"
@@ -37,6 +38,7 @@ install(PROGRAMS
   scripts/pbvs_servo_node.py
   scripts/yolo_tracker_node.py
   scripts/yolo_tracker_venv.sh
+  scripts/grasp_visualizer_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

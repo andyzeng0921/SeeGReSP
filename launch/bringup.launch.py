@@ -42,4 +42,11 @@ def generate_launch_description():
             parameters=[str(config / 'coordinator.yaml')],
             output='screen',
         ),
+        Node(
+            package='adaptive_object_grasping',
+            executable='grasp_visualizer_node.py',
+            name='adaptive_grasp_visualizer',
+            parameters=[str(config / 'visualization.yaml')],
+            output='screen',
+        ),
     ])
