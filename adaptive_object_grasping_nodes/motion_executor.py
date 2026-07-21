@@ -554,7 +554,8 @@ class MotionExecutor(Node):
             ('grasp', candidate.grasp_pose),
             ('lift', lift),
         ):
-            self._plan_moveit(component, pose, tip, stage)
+            result = self._plan_moveit(component, pose, tip, stage)
+            self._moveit_result_to_vendor_trajectory(candidate.arm, result)
         self._publish_status('moveit_dry_run_planned', candidate.arm)
 
     def _execute_moveit(self, candidate, execute_with_moveit=False):
@@ -636,7 +637,8 @@ class MotionExecutor(Node):
         self._wait_for_eef(arm, target_position, target_orientation, stage)
 
     def _moveit_result_to_vendor_trajectory(self, arm, result):
-        joint_trajectory = result.trajectory.joint_trajectory
+        trajectory_message = result.trajectory.get_robot_trajectory_msg()
+        joint_trajectory = trajectory_message.joint_trajectory
         if not joint_trajectory.points:
             raise RuntimeError('MoveIt2 returned an empty trajectory')
         names = list(joint_trajectory.joint_names)
