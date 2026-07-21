@@ -1,6 +1,6 @@
 adaptive_grasp_motion_executor:
   ros__parameters:
-    planning_backend: vendor_rrt
+    planning_backend: moveit_py_vendor_execution
     dry_run: true
     allow_hardware_execution: false
     require_hardware_ready: true
@@ -24,6 +24,10 @@ adaptive_grasp_motion_executor:
     moveit_right_group: Right_Arm
     moveit_left_tip: Link_Left_Wrist_Lower_to_Gripper
     moveit_right_tip: Link_Right_Wrist_Lower_to_Gripper
+    moveit_planning_time: 5.0
+    moveit_planning_attempts: 5
+    moveit_max_velocity_scaling: 0.25
+    moveit_max_acceleration_scaling: 0.25
     enable_pbvs_hardware_follow: false
     pbvs_follow_backend: moveit_servo
     moveit_servo_pose_topic: /servo_node/pose_target_cmds
@@ -31,6 +35,9 @@ adaptive_grasp_motion_executor:
     vendor_service_timeout: 15.0
     vendor_rrt_max_step_size: 0.06
     vendor_trajectory_duration: 4.0
-    vendor_excluded_joints: [Joint_Ankle, Joint_Knee]
+    vendor_excluded_joints: [Joint_Ankle, Joint_Knee, Joint_Waist_Pitch, Joint_Waist_Yaw]
     inactive_arm_position_tolerance: 0.06
     inactive_arm_orientation_tolerance: 0.30
+    auto_prepare_hardware: true
+    hardware_prepare_timeout: 18.0
+    hardware_prepare_joint_tolerance_deg: 3.0

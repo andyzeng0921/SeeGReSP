@@ -14,6 +14,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from adaptive_object_grasping.srv import ExecuteCandidate
 from adaptive_object_grasping_nodes.motion_core import (
@@ -70,6 +71,9 @@ class MotionExecutor(Node):
         self.declare_parameter('vendor_excluded_joints', ['Joint_Ankle', 'Joint_Knee'])
         self.declare_parameter('inactive_arm_position_tolerance', 0.06)
         self.declare_parameter('inactive_arm_orientation_tolerance', 0.30)
+        self.declare_parameter('auto_prepare_hardware', True)
+        self.declare_parameter('hardware_prepare_timeout', 18.0)
+        self.declare_parameter('hardware_prepare_joint_tolerance_deg', 3.0)
 
         suffix = str(self.get_parameter('topic_suffix').value)
         self._condition = threading.Condition()
@@ -81,6 +85,8 @@ class MotionExecutor(Node):
         self._last_pbvs_command = 0.0
         self._moveit = None
         self._moveit_components = {}
+        self._last_joint_feedback_time = 0.0
+        self._joint_target_error_deg = None
         self._joint_names = {
             'leg_waist': ['Joint_Ankle', 'Joint_Knee', 'Joint_Waist_Pitch', 'Joint_Waist_Yaw'],
             'left_arm': ['Joint_Left_Shoulder_Inner', 'Joint_Left_Shoulder_Outer', 'Joint_Left_UpperArm',
@@ -114,6 +120,12 @@ class MotionExecutor(Node):
         )
         self._status_pub = self.create_publisher(String, 'motion_execution_status', 10)
         self._joint_state_pub = self.create_publisher(JointState, 'joint_states', 10)
+        self._control_reset_pub = self.create_publisher(
+            String, f'/control_reset_{suffix}', 10
+        )
+        self._joint_enable_pub = self.create_publisher(
+            String, f'/topic_arm_joints_set_enable_state_{suffix}', 10
+        )
         self.create_subscription(
             String,
             f'/topic_arm_current_robot_eef_pose_{suffix}',
@@ -137,6 +149,12 @@ class MotionExecutor(Node):
             self._execute_service,
             callback_group=callback_group,
         )
+        self.create_service(
+            Trigger,
+            'prepare_grasp_hardware',
+            self._prepare_hardware_service,
+            callback_group=callback_group,
+        )
         self.get_logger().warning(
             f'Motion executor ready: backend={self.get_parameter("planning_backend").value}, '
             f'dry_run={self.get_parameter("dry_run").value}, '
@@ -155,11 +173,23 @@ class MotionExecutor(Node):
     def _on_joints(self, message):
         try:
             parsed = parse_robot_joint_feedback(message.data, self._joint_names)
+            payload = json.loads(message.data)
+            target_errors = []
+            for state_key, target_key in (
+                ('left_arm_joint_state', 'left_arm_target_joint_state'),
+                ('right_arm_joint_state', 'right_arm_target_joint_state'),
+            ):
+                current = payload.get(state_key, {}).get('position', [])
+                target = payload.get(target_key, [])
+                if len(current) == 7 and len(target) == 7:
+                    target_errors.extend(abs(float(a) - float(b)) for a, b in zip(current, target))
             with self._condition:
                 self._current_joints = {
                     group: [parsed[name] for name in joint_names]
                     for group, joint_names in self._joint_names.items()
                 }
+                self._last_joint_feedback_time = time.monotonic()
+                self._joint_target_error_deg = max(target_errors) if target_errors else None
                 self._condition.notify_all()
             self._publish_joint_state(parsed)
         except Exception as exc:
@@ -184,6 +214,54 @@ class MotionExecutor(Node):
         ])
         joint_state.position.extend([0.0, 0.0, 0.0, 0.0, 0.0])
         self._joint_state_pub.publish(joint_state)
+
+    def _prepare_hardware_service(self, _request, response):
+        if not self._execution_unlocked():
+            response.success = True
+            response.message = 'hardware preparation skipped while execution is locked'
+            return response
+        if not bool(self.get_parameter('auto_prepare_hardware').value):
+            response.success = True
+            response.message = 'automatic hardware preparation disabled'
+            return response
+
+        self._publish_status('preparing_hardware', 'reset, enable and PID initialization')
+        self._control_reset_pub.publish(String(data='{}'))
+        time.sleep(1.5)
+        enable = {
+            name: True
+            for group in ('left_arm', 'right_arm')
+            for name in self._joint_names[group]
+        }
+        enable.update({'Joint_Left_Gripper': True, 'Joint_Right_Gripper': True})
+        self._joint_enable_pub.publish(String(data=json.dumps(enable)))
+
+        timeout = float(self.get_parameter('hardware_prepare_timeout').value)
+        tolerance = float(self.get_parameter('hardware_prepare_joint_tolerance_deg').value)
+        deadline = time.monotonic() + timeout
+        stable_since = None
+        with self._condition:
+            while time.monotonic() < deadline:
+                fresh = time.monotonic() - self._last_joint_feedback_time < 1.0
+                error = self._joint_target_error_deg
+                if fresh and error is not None and error <= tolerance:
+                    stable_since = stable_since or time.monotonic()
+                    if time.monotonic() - stable_since >= 1.0:
+                        response.success = True
+                        response.message = f'hardware prepared; maximum arm joint error={error:.2f}deg'
+                        self._publish_status('hardware_ready', response.message)
+                        return response
+                else:
+                    stable_since = None
+                self._condition.wait(timeout=0.1)
+        error = self._joint_target_error_deg
+        response.success = False
+        response.message = (
+            'hardware preparation timed out; maximum arm joint error='
+            + ('unknown' if error is None else f'{error:.2f}deg')
+        )
+        self._publish_status('failed', response.message)
+        return response
 
     def _on_hardware(self, message):
         try:

@@ -8,6 +8,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from adaptive_object_grasping.action import PickObject
 from adaptive_object_grasping.msg import TrackedObject
@@ -38,6 +39,9 @@ class GraspCoordinator(Node):
         )
         self._execute_client = self.create_client(
             ExecuteCandidate, 'execute_grasp_candidate', callback_group=callback_group
+        )
+        self._prepare_client = self.create_client(
+            Trigger, 'prepare_grasp_hardware', callback_group=callback_group
         )
         self._arm_pub = self.create_publisher(String, 'selected_arm', 10)
         self.create_subscription(TrackedObject, 'selected_object', self._on_selected, 10)
@@ -90,6 +94,19 @@ class GraspCoordinator(Node):
     def _run_goal(self, goal_handle, result):
         goal = goal_handle.request
         preferred_arm = goal.preferred_arm or 'auto'
+        if goal.execute:
+            self._feedback(
+                goal_handle,
+                'preparing',
+                'checking and preparing arm hardware',
+                0.0,
+                0.0,
+            )
+            prepared = self._call(self._prepare_client, Trigger.Request())
+            if prepared is None or not prepared.success:
+                return self._abort(goal_handle, result, 'hardware preparation failed: ' + (
+                    'service unavailable' if prepared is None else prepared.message
+                ))
         self._feedback(goal_handle, 'selecting', 'selecting requested object', 0.0, 0.0)
         select_request = SelectObject.Request()
         select_request.track_id = goal.track_id
@@ -155,6 +172,24 @@ class GraspCoordinator(Node):
         candidates = [item for item in estimate.candidates if item.score >= minimum_score]
         if not candidates:
             return self._abort(goal_handle, result, 'no GraspNet candidate passed score filter')
+        if not goal.execute:
+            candidate = max(candidates, key=lambda value: value.score)
+            result.selected_grasp = candidate
+            result.success = True
+            result.message = (
+                f'dry-run generated {len(candidates)} GraspNet candidates; '
+                f'best score={candidate.score:.3f}, arm={candidate.arm}. '
+                'Hardware reachability was not enforced because execute=false.'
+            )
+            self._feedback(
+                goal_handle,
+                'dry_run',
+                result.message,
+                0.0,
+                0.0,
+            )
+            goal_handle.succeed()
+            return result
         candidate = None
         planning = None
         planning_errors = []
@@ -183,17 +218,16 @@ class GraspCoordinator(Node):
 
         self._feedback(
             goal_handle,
-            'executing' if goal.execute else 'dry_run',
+            'executing',
             f'candidate score={candidate.score:.3f}, arm={candidate.arm}',
             0.0,
             0.0,
         )
         execution = planning
-        if goal.execute:
-            execute_request = ExecuteCandidate.Request()
-            execute_request.candidate = candidate
-            execute_request.execute = True
-            execution = self._call(self._execute_client, execute_request)
+        execute_request = ExecuteCandidate.Request()
+        execute_request.candidate = candidate
+        execute_request.execute = True
+        execution = self._call(self._execute_client, execute_request)
         if execution is None or not execution.success:
             return self._abort(goal_handle, result, 'execution failed: ' + (
                 'service unavailable' if execution is None else execution.message
