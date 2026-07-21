@@ -1,0 +1,24 @@
+planning_pipelines:
+  pipeline_names: [ompl]
+default_planning_pipeline: ompl
+ompl:
+  planning_plugins:
+    - ompl_interface/OMPLPlanner
+  request_adapters:
+    - default_planning_request_adapters/ResolveConstraintFrames
+    - default_planning_request_adapters/ValidateWorkspaceBounds
+    - default_planning_request_adapters/CheckStartStateBounds
+    - default_planning_request_adapters/CheckStartStateCollision
+  start_state_max_bounds_error: 0.1
+  planner_configs:
+    RRTConnectkConfigDefault:
+      type: geometric::RRTConnect
+      range: 0.0
+  Left_Arm:
+    planner_configs: [RRTConnectkConfigDefault]
+    projection_evaluator: joints(Joint_Left_Shoulder_Inner,Joint_Left_Elbow)
+    longest_valid_segment_fraction: 0.01
+  Right_Arm:
+    planner_configs: [RRTConnectkConfigDefault]
+    projection_evaluator: joints(Joint_Right_Shoulder_Inner,Joint_Right_Elbow)
+    longest_valid_segment_fraction: 0.01
