@@ -1,15 +1,36 @@
 from pathlib import Path
 
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     share = Path(get_package_share_directory('adaptive_object_grasping'))
     config = share / 'config'
+    moveit_config = config / 'moveit'
+    robot_description = (moveit_config / 'robot_v2_2.urdf').read_text()
+    robot_description_semantic = (moveit_config / 'autolife_s2.srdf').read_text()
+    robot_description_kinematics = yaml.safe_load((moveit_config / 'kinematics.yaml').read_text())
+    moveit_planning = {
+        'planning_pipelines': {'pipeline_names': ['ompl']},
+        'default_planning_pipeline': 'ompl',
+        'ompl': {
+            'planning_plugin': 'ompl_interface/OMPLPlanner',
+            'request_adapters': [
+                'default_planning_request_adapters/ResolveConstraintFrames',
+                'default_planning_request_adapters/ValidateWorkspaceBounds',
+                'default_planning_request_adapters/CheckStartStateBounds',
+                'default_planning_request_adapters/CheckStartStateCollision',
+            ],
+            'start_state_max_bounds_error': 0.1,
+        },
+    }
     return LaunchDescription([
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(share / 'launch' / 'perception.launch.py'))
@@ -29,10 +50,23 @@ def generate_launch_description():
             output='screen',
         ),
         Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='adaptive_grasp_robot_state_publisher',
+            parameters=[{'robot_description': robot_description}],
+            output='screen',
+        ),
+        Node(
             package='adaptive_object_grasping',
             executable='motion_executor_robot_env.sh',
             name='adaptive_grasp_motion_executor',
-            parameters=[str(config / 'motion.yaml')],
+            parameters=[
+                str(config / 'motion.yaml'),
+                {'robot_description': robot_description},
+                {'robot_description_semantic': robot_description_semantic},
+                {'robot_description_kinematics': robot_description_kinematics},
+                moveit_planning,
+            ],
             output='screen',
         ),
         Node(
@@ -47,6 +81,19 @@ def generate_launch_description():
             executable='grasp_visualizer_node.py',
             name='adaptive_grasp_visualizer',
             parameters=[str(config / 'visualization.yaml')],
+            output='screen',
+        ),
+        DeclareLaunchArgument(
+            'rviz',
+            default_value='true',
+            description='Start RViz with the grasp visualization displays.',
+        ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='adaptive_grasp_rviz',
+            arguments=['-d', str(config / 'grasp_visualization.rviz')],
+            condition=IfCondition(LaunchConfiguration('rviz')),
             output='screen',
         ),
     ])
