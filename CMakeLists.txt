@@ -46,6 +46,10 @@ install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY meshes
+  DESTINATION share/${PROJECT_NAME}
+)
+
 install(DIRECTORY docs
   DESTINATION share/${PROJECT_NAME}
 )

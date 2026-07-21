@@ -14,7 +14,10 @@ def generate_launch_description():
     share = Path(get_package_share_directory('adaptive_object_grasping'))
     config = share / 'config'
     moveit_config = config / 'moveit'
-    robot_description = (moveit_config / 'robot_v2_2.urdf').read_text()
+    robot_description = (moveit_config / 'robot_v2_2.urdf').read_text().replace(
+        '../meshes/robot_v2_2/',
+        'package://adaptive_object_grasping/meshes/robot_v2_2/',
+    )
     robot_description_semantic = (moveit_config / 'autolife_s2.srdf').read_text()
     robot_description_kinematics = yaml.safe_load((moveit_config / 'kinematics.yaml').read_text())
     moveit_planning = {
