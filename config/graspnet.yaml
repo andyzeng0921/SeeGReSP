@@ -3,6 +3,8 @@ graspnet_server:
     color_topic: /head_camera/color/image_raw
     depth_topic: /head_camera/aligned_depth_to_color/image_raw
     camera_info_topic: /head_camera/color/camera_info
+    selected_mask_topic: /selected_object_mask
+    use_selected_mask: false
     base_frame: Link_Zero_Point
     graspnet_root: third_party/graspnet-baseline
     checkpoint_path: models/graspnet/checkpoint-rs.tar
@@ -11,13 +13,22 @@ graspnet_server:
     number_views: 300
     minimum_target_points: 300
     depth_scale: 0.001
-    target_depth_band: 0.08
-    collision_threshold: 0.01
+    target_depth_band: 0.15
+    collision_threshold: 0.00
     collision_voxel_size: 0.01
-    minimum_grasp_score: 0.25
-    maximum_gripper_width: 0.095
+    minimum_grasp_score: 0.15
+    maximum_gripper_width: 0.15
     maximum_candidates: 20
+    maximum_raw_candidates: 100
     inference_attempts: 3
     pregrasp_offset: 0.12
     approach_axis: 0
+    horizontal_grasp_filter_enabled: true
+    closing_axis: 1
+    vertical_axis: 2
+    maximum_approach_tilt_degrees: 30.0
+    maximum_closing_tilt_degrees: 30.0
+    apply_grasp_depth: true
+    grasp_depth_scale: 1.0
+    maximum_grasp_depth_offset: 0.05
     tf_timeout: 0.2

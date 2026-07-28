@@ -1,5 +1,7 @@
 import copy
+import glob
 import json
+import struct
 import threading
 import time
 from pathlib import Path
@@ -12,13 +14,14 @@ from autolife_robot_srvs.srv import SetString
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
 
 from adaptive_object_grasping.srv import ExecuteCandidate
 from adaptive_object_grasping_nodes.motion_core import (
     compose_vendor_rrt_target,
+    effective_gripper_width,
     parse_eef_feedback,
     pose_error,
     validate_pose,
@@ -38,21 +41,22 @@ class MotionExecutor(Node):
         self.declare_parameter('allow_hardware_execution', False)
         self.declare_parameter('require_hardware_ready', True)
         self.declare_parameter('base_frame', 'Link_Zero_Point')
-        self.declare_parameter('topic_suffix', '0_283')
+        self.declare_parameter('topic_suffix', '0_306')
         self.declare_parameter('workspace_minimum', [0.10, -0.75, 0.20])
         self.declare_parameter('workspace_maximum', [0.85, 0.75, 1.45])
         self.declare_parameter('motion_timeout', 12.0)
         self.declare_parameter('position_tolerance', 0.025)
         self.declare_parameter('orientation_tolerance', 0.15)
         self.declare_parameter('maximum_gripper_width', 0.10)
+        self.declare_parameter('grasp_width_scale', 0.5)
         self.declare_parameter('gripper_open_position', 10.0)
         self.declare_parameter('gripper_closed_position', 330.0)
         self.declare_parameter('gripper_wait', 1.0)
         self.declare_parameter('lift_distance', 0.10)
         self.declare_parameter('left_tcp_translation', [0.20187, -0.00014, -0.03035])
         self.declare_parameter('right_tcp_translation', [0.20188, 0.0, -0.03035])
-        self.declare_parameter('left_tcp_quaternion', [0.0, 0.0, 0.0, 1.0])
-        self.declare_parameter('right_tcp_quaternion', [0.0, 0.0, 0.0, 1.0])
+        self.declare_parameter('left_tcp_quaternion', [-0.70710678, 0.0, 0.0, 0.70710678])
+        self.declare_parameter('right_tcp_quaternion', [-0.70710678, 0.0, 0.0, 0.70710678])
         self.declare_parameter('moveit_left_group', 'Left_Arm')
         self.declare_parameter('moveit_right_group', 'Right_Arm')
         self.declare_parameter('moveit_left_tip', 'Link_Left_Wrist_Lower_to_Gripper')
@@ -69,11 +73,10 @@ class MotionExecutor(Node):
         self.declare_parameter('vendor_rrt_max_step_size', 0.06)
         self.declare_parameter('vendor_trajectory_duration', 4.0)
         self.declare_parameter('vendor_excluded_joints', ['Joint_Ankle', 'Joint_Knee'])
+        self.declare_parameter('enable_joints_before_execute', True)
+        self.declare_parameter('enable_pid_loop_before_execute', True)
         self.declare_parameter('inactive_arm_position_tolerance', 0.06)
         self.declare_parameter('inactive_arm_orientation_tolerance', 0.30)
-        self.declare_parameter('auto_prepare_hardware', True)
-        self.declare_parameter('hardware_prepare_timeout', 18.0)
-        self.declare_parameter('hardware_prepare_joint_tolerance_deg', 3.0)
 
         suffix = str(self.get_parameter('topic_suffix').value)
         self._condition = threading.Condition()
@@ -87,6 +90,7 @@ class MotionExecutor(Node):
         self._moveit_components = {}
         self._last_joint_feedback_time = 0.0
         self._joint_target_error_deg = None
+        self._target_joint_state = None
         self._joint_names = {
             'leg_waist': ['Joint_Ankle', 'Joint_Knee', 'Joint_Waist_Pitch', 'Joint_Waist_Yaw'],
             'left_arm': ['Joint_Left_Shoulder_Inner', 'Joint_Left_Shoulder_Outer', 'Joint_Left_UpperArm',
@@ -106,6 +110,9 @@ class MotionExecutor(Node):
         self._vendor_trajectory_pub = self.create_publisher(
             String, f'/topic_arm_move_joints_trajectory_{suffix}', 10
         )
+        self._target_joints_pub = self.create_publisher(
+            String, f'/topic_arm_whole_body_target_joints_position_{suffix}', 10
+        )
         self._ik_client = self.create_client(
             SetString, f'/service_arm_robot_inverse_kinematics_{suffix}'
         )
@@ -120,11 +127,19 @@ class MotionExecutor(Node):
         )
         self._status_pub = self.create_publisher(String, 'motion_execution_status', 10)
         self._joint_state_pub = self.create_publisher(JointState, 'joint_states', 10)
-        self._control_reset_pub = self.create_publisher(
-            String, f'/control_reset_{suffix}', 10
+        target_state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._target_joint_state_pub = self.create_publisher(
+            JointState, '/adaptive_grasp/target_joint_states', target_state_qos
         )
         self._joint_enable_pub = self.create_publisher(
             String, f'/topic_arm_joints_set_enable_state_{suffix}', 10
+        )
+        self._joint_clear_error_pub = self.create_publisher(
+            String, f'/topic_arm_joints_clear_error_{suffix}', 10
         )
         self.create_subscription(
             String,
@@ -149,12 +164,7 @@ class MotionExecutor(Node):
             self._execute_service,
             callback_group=callback_group,
         )
-        self.create_service(
-            Trigger,
-            'prepare_grasp_hardware',
-            self._prepare_hardware_service,
-            callback_group=callback_group,
-        )
+        self.create_timer(0.5, self._republish_target_joint_state)
         self.get_logger().warning(
             f'Motion executor ready: backend={self.get_parameter("planning_backend").value}, '
             f'dry_run={self.get_parameter("dry_run").value}, '
@@ -215,53 +225,41 @@ class MotionExecutor(Node):
         joint_state.position.extend([0.0, 0.0, 0.0, 0.0, 0.0])
         self._joint_state_pub.publish(joint_state)
 
-    def _prepare_hardware_service(self, _request, response):
-        if not self._execution_unlocked():
-            response.success = True
-            response.message = 'hardware preparation skipped while execution is locked'
-            return response
-        if not bool(self.get_parameter('auto_prepare_hardware').value):
-            response.success = True
-            response.message = 'automatic hardware preparation disabled'
-            return response
-
-        self._publish_status('preparing_hardware', 'reset, enable and PID initialization')
-        self._control_reset_pub.publish(String(data='{}'))
-        time.sleep(1.5)
-        enable = {
-            name: True
-            for group in ('left_arm', 'right_arm')
-            for name in self._joint_names[group]
-        }
-        enable.update({'Joint_Left_Gripper': True, 'Joint_Right_Gripper': True})
-        self._joint_enable_pub.publish(String(data=json.dumps(enable)))
-
-        timeout = float(self.get_parameter('hardware_prepare_timeout').value)
-        tolerance = float(self.get_parameter('hardware_prepare_joint_tolerance_deg').value)
-        deadline = time.monotonic() + timeout
-        stable_since = None
+    def _publish_target_joint_state(self, planned_radians):
         with self._condition:
-            while time.monotonic() < deadline:
-                fresh = time.monotonic() - self._last_joint_feedback_time < 1.0
-                error = self._joint_target_error_deg
-                if fresh and error is not None and error <= tolerance:
-                    stable_since = stable_since or time.monotonic()
-                    if time.monotonic() - stable_since >= 1.0:
-                        response.success = True
-                        response.message = f'hardware prepared; maximum arm joint error={error:.2f}deg'
-                        self._publish_status('hardware_ready', response.message)
-                        return response
-                else:
-                    stable_since = None
-                self._condition.wait(timeout=0.1)
-        error = self._joint_target_error_deg
-        response.success = False
-        response.message = (
-            'hardware preparation timed out; maximum arm joint error='
-            + ('unknown' if error is None else f'{error:.2f}deg')
-        )
-        self._publish_status('failed', response.message)
-        return response
+            current_joints = copy.deepcopy(self._current_joints)
+        if current_joints is None:
+            raise RuntimeError('current joint feedback is required to publish target robot state')
+        joint_state = JointState()
+        joint_state.header.stamp = self.get_clock().now().to_msg()
+        for group in ('leg_waist', 'left_arm', 'right_arm', 'neck'):
+            for name, current_degrees in zip(self._joint_names[group], current_joints[group]):
+                joint_state.name.append(name)
+                joint_state.position.append(
+                    float(planned_radians.get(
+                        name,
+                        float(current_degrees) * 3.141592653589793 / 180.0,
+                    ))
+                )
+        joint_state.name.extend([
+            'Joint_Ground_Vehicle_X',
+            'Joint_Ground_Vehicle_Y',
+            'Joint_Ground_Vehicle_Z',
+            'Joint_Left_Gripper',
+            'Joint_Right_Gripper',
+        ])
+        joint_state.position.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+        with self._condition:
+            self._target_joint_state = copy.deepcopy(joint_state)
+        self._target_joint_state_pub.publish(joint_state)
+
+    def _republish_target_joint_state(self):
+        with self._condition:
+            joint_state = copy.deepcopy(self._target_joint_state)
+        if joint_state is None:
+            return
+        joint_state.header.stamp = self.get_clock().now().to_msg()
+        self._target_joint_state_pub.publish(joint_state)
 
     def _on_hardware(self, message):
         try:
@@ -320,6 +318,7 @@ class MotionExecutor(Node):
             response.message = 'hardware execution remains locked by configuration or hardware probe'
             return response
         try:
+            self._enable_execution_joints(candidate.arm)
             backend = str(self.get_parameter('planning_backend').value)
             if backend == 'moveit_py':
                 self._execute_moveit(candidate, execute_with_moveit=True)
@@ -337,6 +336,57 @@ class MotionExecutor(Node):
             response.message = f'grasp execution failed: {exc}'
             self._publish_status('failed', response.message)
         return response
+
+
+    def _enable_execution_joints(self, arm):
+        if not bool(self.get_parameter('enable_joints_before_execute').value):
+            return
+        with self._condition:
+            current_joints = copy.deepcopy(self._current_joints)
+        if current_joints is not None:
+            self._publish_status('syncing_current_joint_targets', arm)
+            self._target_joints_pub.publish(String(data=json.dumps({
+                'leg_waist_target_joints_position': [float(value) for value in current_joints['leg_waist']],
+                'left_arm_target_joints_position': [float(value) for value in current_joints['left_arm']],
+                'right_arm_target_joints_position': [float(value) for value in current_joints['right_arm']],
+            })))
+            time.sleep(0.3)
+
+        groups = [arm + '_arm']
+        joint_names = [
+            name
+            for group in groups
+            for name in self._joint_names[group]
+        ]
+        gripper_name = f'Joint_{arm.capitalize()}_Gripper'
+        clear_names = list(joint_names)
+        enable = {name: True for name in joint_names}
+        enable[gripper_name] = True
+        self._publish_status('clearing_joint_errors', arm)
+        self._joint_clear_error_pub.publish(String(data=json.dumps(clear_names)))
+        time.sleep(0.3)
+        self._publish_status('enabling_joints', arm)
+        self._joint_enable_pub.publish(String(data=json.dumps(enable)))
+        time.sleep(0.8)
+        self._enable_vendor_pid_loop()
+
+
+    def _enable_vendor_pid_loop(self):
+        if not bool(self.get_parameter('enable_pid_loop_before_execute').value):
+            return
+        paths = sorted(glob.glob('/dev/shm/pid_loop_state_*'))
+        if not paths:
+            self.get_logger().warning('vendor PID loop shared memory was not found')
+            return
+        for path in paths:
+            try:
+                with open(path, 'r+b', buffering=0) as handle:
+                    handle.seek(0)
+                    handle.write(struct.pack('i', 1))
+                    handle.flush()
+            except OSError as exc:
+                self.get_logger().warning(f'failed to enable vendor PID loop via {path}: {exc}')
+        self._publish_status('pid_loop_enabled', ','.join(paths))
 
     def _execution_unlocked(self):
         if bool(self.get_parameter('dry_run').value):
@@ -368,8 +418,15 @@ class MotionExecutor(Node):
             )
             if error:
                 return f'{label} pose rejected: {error}'
-        if candidate.required_width > float(self.get_parameter('maximum_gripper_width').value):
-            return 'required gripper width exceeds configured maximum'
+        raw_width = float(candidate.required_width)
+        width_scale = float(self.get_parameter('grasp_width_scale').value)
+        maximum_width = float(self.get_parameter('maximum_gripper_width').value)
+        scaled_width = effective_gripper_width(raw_width, width_scale)
+        if scaled_width > maximum_width:
+            return (
+                f'effective gripper width {scaled_width:.3f}m exceeds configured maximum '
+                f'{maximum_width:.3f}m (raw={raw_width:.3f}m, scale={width_scale:.3f})'
+            )
         return ''
 
     def _execute_vendor(self, candidate):
@@ -385,6 +442,7 @@ class MotionExecutor(Node):
             float(self.get_parameter('maximum_gripper_width').value),
             float(self.get_parameter('gripper_open_position').value),
             float(self.get_parameter('gripper_closed_position').value),
+            float(self.get_parameter('grasp_width_scale').value),
         )
         self._command_gripper(arm, position)
         time.sleep(float(self.get_parameter('gripper_wait').value))
@@ -406,6 +464,7 @@ class MotionExecutor(Node):
             float(self.get_parameter('maximum_gripper_width').value),
             float(self.get_parameter('gripper_open_position').value),
             float(self.get_parameter('gripper_closed_position').value),
+            float(self.get_parameter('grasp_width_scale').value),
         )
         self._command_gripper(arm, position)
         time.sleep(float(self.get_parameter('gripper_wait').value))
@@ -430,12 +489,30 @@ class MotionExecutor(Node):
     def _validate_vendor_rrt_candidate(self, candidate):
         lift = copy.deepcopy(candidate.grasp_pose)
         lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        grasp_trajectory = None
         for stage, pose in (
             ('pregrasp', candidate.pregrasp_pose),
             ('grasp', candidate.grasp_pose),
             ('lift', lift),
         ):
-            self._plan_vendor_rrt_pose(candidate.arm, pose, stage)
+            _, _, trajectory = self._plan_vendor_rrt_pose(candidate.arm, pose, stage)
+            if stage == 'grasp':
+                grasp_trajectory = trajectory
+        if grasp_trajectory:
+            final = grasp_trajectory[-1]
+            names = (
+                self._joint_names['leg_waist']
+                + self._joint_names['left_arm']
+                + self._joint_names['right_arm']
+            )
+            if len(final) != len(names):
+                raise RuntimeError(
+                    f'vendor target trajectory has {len(final)} joints, expected {len(names)}'
+                )
+            self._publish_target_joint_state({
+                name: float(value) * 3.141592653589793 / 180.0
+                for name, value in zip(names, final)
+            })
         self._publish_status('dry_run_planned', candidate.arm)
 
     def _plan_vendor_rrt_pose(self, arm, pose, stage):
@@ -627,13 +704,26 @@ class MotionExecutor(Node):
         tip = str(self.get_parameter(f'moveit_{candidate.arm}_tip').value)
         lift = copy.deepcopy(candidate.grasp_pose)
         lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        grasp_result = None
         for stage, pose in (
             ('pregrasp', candidate.pregrasp_pose),
             ('grasp', candidate.grasp_pose),
             ('lift', lift),
         ):
-            result = self._plan_moveit(component, pose, tip, stage)
+            result = self._plan_moveit(
+                component, self._tcp_pose_to_eef_pose(candidate.arm, pose), tip, stage
+            )
             self._moveit_result_to_vendor_trajectory(candidate.arm, result)
+            if stage == 'grasp':
+                grasp_result = result
+        if grasp_result is not None:
+            trajectory = grasp_result.trajectory.get_robot_trajectory_msg().joint_trajectory
+            if not trajectory.points:
+                raise RuntimeError('MoveIt2 returned an empty grasp trajectory')
+            self._publish_target_joint_state(dict(zip(
+                trajectory.joint_names,
+                [float(value) for value in trajectory.points[-1].positions],
+            )))
         self._publish_status('moveit_dry_run_planned', candidate.arm)
 
     def _execute_moveit(self, candidate, execute_with_moveit=False):
@@ -649,6 +739,7 @@ class MotionExecutor(Node):
             float(self.get_parameter('maximum_gripper_width').value),
             float(self.get_parameter('gripper_open_position').value),
             float(self.get_parameter('gripper_closed_position').value),
+            float(self.get_parameter('grasp_width_scale').value),
         )
         self._command_gripper(candidate.arm, close_position)
         time.sleep(float(self.get_parameter('gripper_wait').value))
@@ -698,8 +789,23 @@ class MotionExecutor(Node):
             raise RuntimeError(f'MoveIt planning failed for {stage}')
         return result
 
+    def _tcp_pose_to_eef_pose(self, arm, pose):
+        target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
+        result = PoseStamped()
+        result.header = pose.header
+        result.pose.position.x, result.pose.position.y, result.pose.position.z = [
+            float(value) for value in target_position
+        ]
+        (
+            result.pose.orientation.x,
+            result.pose.orientation.y,
+            result.pose.orientation.z,
+            result.pose.orientation.w,
+        ) = [float(value) for value in target_orientation]
+        return result
+
     def _plan_and_execute_moveit(self, component, arm, pose, tip, stage, execute_with_moveit):
-        result = self._plan_moveit(component, pose, tip, stage)
+        result = self._plan_moveit(component, self._tcp_pose_to_eef_pose(arm, pose), tip, stage)
         if execute_with_moveit:
             self._moveit.execute(result.trajectory, controllers=[])
             return

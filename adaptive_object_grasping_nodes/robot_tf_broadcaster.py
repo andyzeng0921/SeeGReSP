@@ -22,8 +22,8 @@ class RobotTfBroadcaster(Node):
             '/home/ubuntu/miniconda3/envs/robot_env/lib/python3.12/site-packages/'
             'autolife_robot_sdk/descriptions/autolife_s1/urdfs/robot_v2_2.urdf',
         )
-        self.declare_parameter('joint_state_topic', '/topic_arm_whole_body_and_gripper_current_joints_status_0_283')
-        self.declare_parameter('eef_pose_topic', '/topic_arm_current_robot_eef_pose_0_283')
+        self.declare_parameter('joint_state_topic', '/topic_arm_whole_body_and_gripper_current_joints_status_0_306')
+        self.declare_parameter('eef_pose_topic', '/topic_arm_current_robot_eef_pose_0_306')
         self.declare_parameter('base_frame', 'Link_Zero_Point')
         self.declare_parameter('camera_mount_frame', 'Link_Camera_Head_Forehead')
         self.declare_parameter('camera_frame', 'rgbd_head_color_optical_frame')

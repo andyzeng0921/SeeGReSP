@@ -1,0 +1,12 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "/home/ubuntu/zeng-Visual Grasping/agent_workspace"
+    }
+  },
+  "tools": {
+    "fs": {
+      "workspaceOnly": true
+    }
+  }
+}

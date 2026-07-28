@@ -10,6 +10,7 @@ def target_point_cloud(
     intrinsics,
     *,
     target_depth,
+    mask=None,
     depth_scale=0.001,
     depth_band=0.08,
     minimum_depth=0.15,
@@ -25,6 +26,10 @@ def target_point_cloud(
     depth_m = depth.astype(np.float64) * scale
     valid = np.zeros((height, width), dtype=bool)
     valid[y1:y2, x1:x2] = True
+    if mask is not None:
+        from adaptive_object_grasping_nodes.perception_core import resize_mask_nearest
+
+        valid &= resize_mask_nearest(np.asarray(mask), height, width)
     valid &= np.isfinite(depth_m)
     valid &= (depth_m >= minimum_depth) & (depth_m <= maximum_depth)
     if target_depth > 0.0:
@@ -47,6 +52,16 @@ def sample_point_cloud(points, colors, number, random_generator=None):
     replace = len(points) < int(number)
     indices = random_generator.choice(len(points), int(number), replace=replace)
     return points[indices], colors[indices]
+
+
+def orthonormalize_rotation(matrix):
+    matrix = np.asarray(matrix, dtype=np.float64).reshape(3, 3)
+    u, _, vt = np.linalg.svd(matrix)
+    rotation = u @ vt
+    if np.linalg.det(rotation) < 0.0:
+        u[:, -1] *= -1.0
+        rotation = u @ vt
+    return rotation
 
 
 def matrix_to_quaternion(matrix):
@@ -96,6 +111,51 @@ def transform_grasp_pose(position, rotation, tf_translation, tf_quaternion):
     )
     rotation = tf_rotation @ np.asarray(rotation, dtype=np.float64).reshape(3, 3)
     return position, rotation
+
+
+def apply_grasp_depth_offset(position, rotation, approach_axis, depth, scale=1.0, maximum=0.05):
+    position = np.asarray(position, dtype=np.float64)
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    axis = int(approach_axis)
+    if axis < 0 or axis >= 3:
+        raise ValueError(f'approach axis must be 0, 1 or 2, got {axis}')
+    offset = float(np.clip(float(depth) * float(scale), 0.0, float(maximum)))
+    return position + rotation[:, axis] * offset, offset
+
+
+def axis_tilt_from_horizontal_degrees(rotation, axis, vertical_axis=2):
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    axis = int(axis)
+    vertical_axis = int(vertical_axis)
+    if axis < 0 or axis >= 3:
+        raise ValueError(f'grasp axis must be 0, 1 or 2, got {axis}')
+    if vertical_axis < 0 or vertical_axis >= 3:
+        raise ValueError(f'vertical axis must be 0, 1 or 2, got {vertical_axis}')
+    vector = rotation[:, axis]
+    norm = max(float(np.linalg.norm(vector)), 1e-9)
+    vertical_component = float(np.clip(abs(vector[vertical_axis]) / norm, 0.0, 1.0))
+    return float(np.degrees(np.arcsin(vertical_component)))
+
+
+def is_horizontal_grasp(
+    rotation,
+    approach_axis=0,
+    closing_axis=1,
+    vertical_axis=2,
+    maximum_approach_tilt_degrees=15.0,
+    maximum_closing_tilt_degrees=15.0,
+):
+    approach_tilt = axis_tilt_from_horizontal_degrees(
+        rotation, approach_axis, vertical_axis
+    )
+    closing_tilt = axis_tilt_from_horizontal_degrees(
+        rotation, closing_axis, vertical_axis
+    )
+    accepted = (
+        approach_tilt <= float(maximum_approach_tilt_degrees)
+        and closing_tilt <= float(maximum_closing_tilt_degrees)
+    )
+    return accepted, approach_tilt, closing_tilt
 
 
 def parse_grasp_array(row):

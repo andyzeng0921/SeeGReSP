@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -17,6 +18,11 @@ def generate_launch_description():
     robot_description = (moveit_config / 'robot_v2_2.urdf').read_text().replace(
         '../meshes/robot_v2_2/',
         'package://adaptive_object_grasping/meshes/robot_v2_2/',
+    )
+    target_robot_description = re.sub(
+        r'rgba="[^"]+"',
+        'rgba="0.0 0.95 1.0 1.0"',
+        robot_description,
     )
     robot_description_semantic = (moveit_config / 'autolife_s2.srdf').read_text()
     robot_description_kinematics = yaml.safe_load((moveit_config / 'kinematics.yaml').read_text())
@@ -57,6 +63,33 @@ def generate_launch_description():
             executable='robot_state_publisher',
             name='adaptive_grasp_robot_state_publisher',
             parameters=[{'robot_description': robot_description}],
+            output='screen',
+        ),
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='adaptive_grasp_target_base_tf',
+            arguments=[
+                '--x', '0', '--y', '0', '--z', '0',
+                '--roll', '0', '--pitch', '0', '--yaw', '0',
+                '--frame-id', 'Link_Zero_Point',
+                '--child-frame-id', 'grasp_target/Link_Ground_Vehicle_X',
+            ],
+            output='screen',
+        ),
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            name='adaptive_grasp_target_robot_state_publisher',
+            parameters=[{
+                'robot_description': target_robot_description,
+                'frame_prefix': 'grasp_target/',
+                'publish_frequency': 15.0,
+            }],
+            remappings=[
+                ('joint_states', '/adaptive_grasp/target_joint_states'),
+                ('robot_description', '/adaptive_grasp/target_robot_description'),
+            ],
             output='screen',
         ),
         Node(

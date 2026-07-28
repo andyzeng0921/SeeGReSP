@@ -19,10 +19,10 @@ class HardwareProbe(Node):
         self.declare_parameter('camera_info_topic', '/head_camera/color/camera_info')
         self.declare_parameter(
             'joint_state_topic',
-            '/topic_arm_whole_body_and_gripper_current_joints_status_0_283',
+            '/topic_arm_whole_body_and_gripper_current_joints_status_0_306',
         )
         self.declare_parameter(
-            'eef_pose_topic', '/topic_arm_current_robot_eef_pose_0_283'
+            'eef_pose_topic', '/topic_arm_current_robot_eef_pose_0_306'
         )
         self.declare_parameter('base_frame', 'Link_Zero_Point')
         self.declare_parameter('camera_frame', 'rgbd_head_color_optical_frame')

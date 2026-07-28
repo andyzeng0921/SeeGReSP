@@ -4,3 +4,4 @@ adaptive_grasp_coordinator:
     default_tracking_timeout: 12.0
     post_stable_confirmation: 0.35
     minimum_grasp_score: 0.25
+    skip_pbvs_tracking: true

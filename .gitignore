@@ -1,9 +1,12 @@
 __pycache__/
 *.py[cod]
+*.bak_before_*
 .pytest_cache/
 build/
 install/
 log/
+test-log/
+runtime/
 models/
 third_party/
 *.pt

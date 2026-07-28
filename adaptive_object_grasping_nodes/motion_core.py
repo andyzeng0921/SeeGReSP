@@ -76,8 +76,15 @@ def vendor_pose_payload(active_arm, position, orientation, current_poses):
     }
 
 
-def width_to_gripper_position(width, maximum_width, open_position, closed_position):
-    ratio = np.clip(float(width) / float(maximum_width), 0.0, 1.0)
+def effective_gripper_width(width, width_scale=1.0):
+    return float(width) * float(width_scale)
+
+
+def width_to_gripper_position(
+    width, maximum_width, open_position, closed_position, width_scale=1.0
+):
+    effective_width = effective_gripper_width(width, width_scale)
+    ratio = np.clip(effective_width / float(maximum_width), 0.0, 1.0)
     return float(closed_position + ratio * (open_position - closed_position))
 
 

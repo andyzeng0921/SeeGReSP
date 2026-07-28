@@ -48,6 +48,23 @@ def resize_mask_nearest(mask, height, width):
     return mask[np.ix_(rows, cols)] > 0.5
 
 
+def mask_to_image_message(mask, header):
+    from sensor_msgs.msg import Image
+
+    result = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    if result.ndim != 2:
+        raise ValueError(f'mask must be 2D, got {result.shape}')
+    message = Image()
+    message.header = header
+    message.height = int(result.shape[0])
+    message.width = int(result.shape[1])
+    message.encoding = 'mono8'
+    message.is_bigendian = False
+    message.step = int(result.shape[1])
+    message.data = np.ascontiguousarray(result).tobytes()
+    return message
+
+
 def object_depth_and_pixel(
     depth,
     box,

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="robot_v2_2">
+  <group name="Left_Arm">
+    <joint name="Joint_Left_Shoulder_Inner"/>
+    <joint name="Joint_Left_Shoulder_Outer"/>
+    <joint name="Joint_Left_UpperArm"/>
+    <joint name="Joint_Left_Elbow"/>
+    <joint name="Joint_Left_Forearm"/>
+    <joint name="Joint_Left_Wrist_Upper"/>
+    <joint name="Joint_Left_Wrist_Lower"/>
+  </group>
+  <group name="Right_Arm">
+    <joint name="Joint_Right_Shoulder_Inner"/>
+    <joint name="Joint_Right_Shoulder_Outer"/>
+    <joint name="Joint_Right_UpperArm"/>
+    <joint name="Joint_Right_Elbow"/>
+    <joint name="Joint_Right_Forearm"/>
+    <joint name="Joint_Right_Wrist_Upper"/>
+    <joint name="Joint_Right_Wrist_Lower"/>
+  </group>
+  <group_state name="current" group="Left_Arm">
+    <joint name="Joint_Left_Shoulder_Inner" value="0"/>
+    <joint name="Joint_Left_Shoulder_Outer" value="0"/>
+    <joint name="Joint_Left_UpperArm" value="0"/>
+    <joint name="Joint_Left_Elbow" value="1.2"/>
+    <joint name="Joint_Left_Forearm" value="0"/>
+    <joint name="Joint_Left_Wrist_Upper" value="0"/>
+    <joint name="Joint_Left_Wrist_Lower" value="0"/>
+  </group_state>
+  <group_state name="current" group="Right_Arm">
+    <joint name="Joint_Right_Shoulder_Inner" value="0"/>
+    <joint name="Joint_Right_Shoulder_Outer" value="0"/>
+    <joint name="Joint_Right_UpperArm" value="0"/>
+    <joint name="Joint_Right_Elbow" value="-1.2"/>
+    <joint name="Joint_Right_Forearm" value="0"/>
+    <joint name="Joint_Right_Wrist_Upper" value="0"/>
+    <joint name="Joint_Right_Wrist_Lower" value="0"/>
+  </group_state>
+</robot>

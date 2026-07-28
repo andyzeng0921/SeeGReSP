@@ -3,6 +3,7 @@ import math
 
 from adaptive_object_grasping_nodes.motion_core import (
     compose_vendor_rrt_target,
+    effective_gripper_width,
     parse_eef_feedback,
     pose_error,
     validate_pose,
@@ -49,6 +50,19 @@ def test_gripper_mapping_opens_for_wider_object():
     narrow = width_to_gripper_position(0.02, 0.10, 0.0, 330.0)
     wide = width_to_gripper_position(0.08, 0.10, 0.0, 330.0)
     assert wide < narrow
+
+
+def test_gripper_width_scale_maps_nine_centimeters_to_four_point_five():
+    position = width_to_gripper_position(
+        0.09, 0.095, 10.0, 330.0, width_scale=0.5
+    )
+    expected = 330.0 + (0.09 * 0.5 / 0.095) * (10.0 - 330.0)
+    assert abs(position - expected) < 1e-9
+
+
+def test_effective_gripper_width_applies_scale_before_limit_check():
+    assert abs(effective_gripper_width(0.12, 0.5) - 0.06) < 1e-9
+    assert effective_gripper_width(0.12, 0.5) < 0.095
 
 
 def test_vendor_rrt_target_and_trajectory_contract():

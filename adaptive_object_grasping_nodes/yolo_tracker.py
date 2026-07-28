@@ -14,8 +14,10 @@ from adaptive_object_grasping_nodes.perception_core import (
     CameraIntrinsics,
     deproject_pixel,
     image_buffer_to_array,
+    mask_to_image_message,
     object_depth_and_pixel,
     object_menu_lines,
+    resize_mask_nearest,
 )
 
 
@@ -27,9 +29,9 @@ class YoloTracker(Node):
         self.declare_parameter('color_topic', '/head_camera/color/image_raw')
         self.declare_parameter('depth_topic', '/head_camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic', '/head_camera/color/camera_info')
-        self.declare_parameter('model', 'models/yolo/yolo11n-seg.pt')
+        self.declare_parameter('model', 'models/yolo/yolo11n.pt')
         self.declare_parameter('tracker', 'bytetrack.yaml')
-        self.declare_parameter('device', '0')
+        self.declare_parameter('device', 'auto')
         self.declare_parameter('image_size', 640)
         self.declare_parameter('confidence_threshold', 0.35)
         self.declare_parameter('iou_threshold', 0.55)
@@ -38,6 +40,7 @@ class YoloTracker(Node):
         self.declare_parameter('minimum_depth', 0.15)
         self.declare_parameter('maximum_depth', 2.5)
         self.declare_parameter('allowed_classes', ['*'])
+        self.declare_parameter('selected_mask_topic', '/selected_object_mask')
 
         self._lock = threading.Lock()
         self._wake = threading.Event()
@@ -48,12 +51,17 @@ class YoloTracker(Node):
         self._depth = None
         self._intrinsics = None
         self._objects = []
+        self._object_masks = {}
         self._selected_id = None
         self._model = None
         self._model_error = ''
+        self._resolved_device = None
 
         self._objects_pub = self.create_publisher(TrackedObjectArray, 'tracked_objects', 10)
         self._selected_pub = self.create_publisher(TrackedObject, 'selected_object', 10)
+        self._selected_mask_pub = self.create_publisher(
+            Image, str(self.get_parameter('selected_mask_topic').value), 10
+        )
         self._menu_pub = self.create_publisher(String, 'object_menu', 10)
         self.create_subscription(
             Image,
@@ -82,6 +90,21 @@ class YoloTracker(Node):
             f'YOLO tracker starting: model={self.get_parameter("model").value}, '
             f'device={self.get_parameter("device").value}'
         )
+
+    def _resolve_device(self):
+        requested = str(self.get_parameter('device').value).strip().lower()
+        if requested not in ('', 'auto'):
+            return requested
+        if self._resolved_device is not None:
+            return self._resolved_device
+        try:
+            import torch
+
+            self._resolved_device = '0' if torch.cuda.is_available() else 'cpu'
+        except Exception:
+            self._resolved_device = 'cpu'
+        self.get_logger().info(f'YOLO device resolved to {self._resolved_device}')
+        return self._resolved_device
 
     def _on_color(self, message):
         try:
@@ -151,8 +174,8 @@ class YoloTracker(Node):
             previous_sequence = sequence
             try:
                 result = self._infer(color)
-                objects = self._messages_from_result(result, header, depth, intrinsics)
-                self._publish_objects(header, objects)
+                objects, masks_by_id = self._messages_from_result(result, header, depth, intrinsics, color.shape[:2])
+                self._publish_objects(header, objects, masks_by_id)
             except Exception as exc:
                 self.get_logger().error(f'YOLO inference failed: {exc}')
             remaining = minimum_period - (time.monotonic() - started)
@@ -167,14 +190,14 @@ class YoloTracker(Node):
             conf=float(self.get_parameter('confidence_threshold').value),
             iou=float(self.get_parameter('iou_threshold').value),
             imgsz=int(self.get_parameter('image_size').value),
-            device=str(self.get_parameter('device').value),
+            device=self._resolve_device(),
             verbose=False,
         )
         return results[0]
 
-    def _messages_from_result(self, result, header, depth, intrinsics):
+    def _messages_from_result(self, result, header, depth, intrinsics, image_shape):
         if result.boxes is None or len(result.boxes) == 0:
-            return []
+            return [], {}
         boxes = result.boxes.xyxy.detach().cpu().numpy()
         classes = result.boxes.cls.detach().cpu().numpy().astype(int)
         scores = result.boxes.conf.detach().cpu().numpy()
@@ -192,6 +215,7 @@ class YoloTracker(Node):
             allowed.clear()
         names = result.names
         messages = []
+        masks_by_id = {}
         for index, (box, class_id, score, track_id) in enumerate(
             zip(boxes, classes, scores, track_ids)
         ):
@@ -209,6 +233,10 @@ class YoloTracker(Node):
             message.bbox_width = max(1, int(round(x2 - x1)))
             message.bbox_height = max(1, int(round(y2 - y1)))
             mask = None if masks is None or index >= len(masks) else masks[index]
+            if mask is not None:
+                masks_by_id[int(track_id)] = resize_mask_nearest(
+                    np.asarray(mask), int(image_shape[0]), int(image_shape[1])
+                )
             if depth is not None and intrinsics is not None:
                 sample = object_depth_and_pixel(
                     depth,
@@ -227,20 +255,24 @@ class YoloTracker(Node):
                     message.position_camera.y = float(point[1])
                     message.position_camera.z = float(point[2])
             messages.append(message)
-        return messages
+        return messages, masks_by_id
 
-    def _publish_objects(self, header, objects):
+    def _publish_objects(self, header, objects, masks_by_id):
         array = TrackedObjectArray()
         array.header = header
         array.objects = objects
         with self._lock:
             self._objects = objects
+            self._object_masks = masks_by_id
             selected = next(
                 (item for item in objects if item.track_id == self._selected_id), None
             )
         self._objects_pub.publish(array)
         if selected is not None:
             self._selected_pub.publish(selected)
+            mask = masks_by_id.get(selected.track_id)
+            if mask is not None:
+                self._selected_mask_pub.publish(mask_to_image_message(mask, header))
 
     def _list_objects(self, _request, response):
         with self._lock:
@@ -269,10 +301,13 @@ class YoloTracker(Node):
             return response
         with self._lock:
             self._selected_id = selected.track_id
+            selected_mask = self._object_masks.get(selected.track_id)
         response.accepted = True
         response.message = f'selected [{selected.track_id}] {selected.label} ({preferred_arm})'
         response.selected = selected
         self._selected_pub.publish(selected)
+        if selected_mask is not None:
+            self._selected_mask_pub.publish(mask_to_image_message(selected_mask, selected.header))
         return response
 
     def _publish_menu(self):

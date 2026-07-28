@@ -8,7 +8,6 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
 
 from adaptive_object_grasping.action import PickObject
 from adaptive_object_grasping.msg import TrackedObject
@@ -26,6 +25,7 @@ class GraspCoordinator(Node):
         self.declare_parameter('default_tracking_timeout', 12.0)
         self.declare_parameter('post_stable_confirmation', 0.35)
         self.declare_parameter('minimum_grasp_score', 0.25)
+        self.declare_parameter('skip_pbvs_tracking', True)
         self._lock = threading.Lock()
         self._goal_lock = threading.Lock()
         self._selected = None
@@ -39,9 +39,6 @@ class GraspCoordinator(Node):
         )
         self._execute_client = self.create_client(
             ExecuteCandidate, 'execute_grasp_candidate', callback_group=callback_group
-        )
-        self._prepare_client = self.create_client(
-            Trigger, 'prepare_grasp_hardware', callback_group=callback_group
         )
         self._arm_pub = self.create_publisher(String, 'selected_arm', 10)
         self.create_subscription(TrackedObject, 'selected_object', self._on_selected, 10)
@@ -94,19 +91,6 @@ class GraspCoordinator(Node):
     def _run_goal(self, goal_handle, result):
         goal = goal_handle.request
         preferred_arm = goal.preferred_arm or 'auto'
-        if goal.execute:
-            self._feedback(
-                goal_handle,
-                'preparing',
-                'checking and preparing arm hardware',
-                0.0,
-                0.0,
-            )
-            prepared = self._call(self._prepare_client, Trigger.Request())
-            if prepared is None or not prepared.success:
-                return self._abort(goal_handle, result, 'hardware preparation failed: ' + (
-                    'service unavailable' if prepared is None else prepared.message
-                ))
         self._feedback(goal_handle, 'selecting', 'selecting requested object', 0.0, 0.0)
         select_request = SelectObject.Request()
         select_request.track_id = goal.track_id
@@ -122,38 +106,41 @@ class GraspCoordinator(Node):
             self._stability = {}
         self._arm_pub.publish(String(data=preferred_arm))
 
-        tracking_timeout = float(goal.maximum_tracking_time)
-        if tracking_timeout <= 0.0:
-            tracking_timeout = float(self.get_parameter('default_tracking_timeout').value)
-        deadline = time.monotonic() + tracking_timeout
-        stable_since = None
-        confirmation = max(
-            float(self.get_parameter('post_stable_confirmation').value),
-            float(goal.required_stable_duration),
-        )
-        while time.monotonic() < deadline:
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                result.message = 'grasp canceled during target tracking'
-                return result
-            with self._lock:
-                status = dict(self._stability)
-            state = status.get('state', 'waiting')
-            detail = status.get('detail', 'waiting for PBVS target')
-            motion = float(status.get('window_motion', 0.0))
-            elapsed = float(status.get('stable_elapsed', 0.0))
-            self._feedback(goal_handle, state, detail, motion, elapsed)
-            if state == 'blocked' and 'exceeded maximum follow distance' in detail:
-                return self._abort(goal_handle, result, detail)
-            if bool(status.get('stable', False)):
-                stable_since = stable_since or time.monotonic()
-                if time.monotonic() - stable_since >= confirmation:
-                    break
-            else:
-                stable_since = None
-            time.sleep(0.05)
+        if bool(self.get_parameter('skip_pbvs_tracking').value):
+            self._feedback(goal_handle, 'selected', 'PBVS tracking skipped; estimating immediately', 0.0, 0.0)
         else:
-            return self._abort(goal_handle, result, 'target did not become stable before timeout')
+            tracking_timeout = float(goal.maximum_tracking_time)
+            if tracking_timeout <= 0.0:
+                tracking_timeout = float(self.get_parameter('default_tracking_timeout').value)
+            deadline = time.monotonic() + tracking_timeout
+            stable_since = None
+            confirmation = max(
+                float(self.get_parameter('post_stable_confirmation').value),
+                float(goal.required_stable_duration),
+            )
+            while time.monotonic() < deadline:
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    result.message = 'grasp canceled during target tracking'
+                    return result
+                with self._lock:
+                    status = dict(self._stability)
+                state = status.get('state', 'waiting')
+                detail = status.get('detail', 'waiting for PBVS target')
+                motion = float(status.get('window_motion', 0.0))
+                elapsed = float(status.get('stable_elapsed', 0.0))
+                self._feedback(goal_handle, state, detail, motion, elapsed)
+                if state == 'blocked' and 'exceeded maximum follow distance' in detail:
+                    return self._abort(goal_handle, result, detail)
+                if bool(status.get('stable', False)):
+                    stable_since = stable_since or time.monotonic()
+                    if time.monotonic() - stable_since >= confirmation:
+                        break
+                else:
+                    stable_since = None
+                time.sleep(0.05)
+            else:
+                return self._abort(goal_handle, result, 'target did not become stable before timeout')
 
         with self._lock:
             target = self._selected
@@ -172,24 +159,6 @@ class GraspCoordinator(Node):
         candidates = [item for item in estimate.candidates if item.score >= minimum_score]
         if not candidates:
             return self._abort(goal_handle, result, 'no GraspNet candidate passed score filter')
-        if not goal.execute:
-            candidate = max(candidates, key=lambda value: value.score)
-            result.selected_grasp = candidate
-            result.success = True
-            result.message = (
-                f'dry-run generated {len(candidates)} GraspNet candidates; '
-                f'best score={candidate.score:.3f}, arm={candidate.arm}. '
-                'Hardware reachability was not enforced because execute=false.'
-            )
-            self._feedback(
-                goal_handle,
-                'dry_run',
-                result.message,
-                0.0,
-                0.0,
-            )
-            goal_handle.succeed()
-            return result
         candidate = None
         planning = None
         planning_errors = []
@@ -215,6 +184,22 @@ class GraspCoordinator(Node):
             detail = '; '.join(planning_errors[:3])
             return self._abort(goal_handle, result, f'no reachable grasp candidate: {detail}')
         result.selected_grasp = candidate
+        if not goal.execute:
+            result.success = True
+            result.message = (
+                f'dry-run IK validated one of {len(candidates)} GraspNet candidates; '
+                f'score={candidate.score:.3f}, arm={candidate.arm}. '
+                'The target robot ghost was published; no hardware command was sent.'
+            )
+            self._feedback(
+                goal_handle,
+                'dry_run',
+                result.message,
+                0.0,
+                0.0,
+            )
+            goal_handle.succeed()
+            return result
 
         self._feedback(
             goal_handle,

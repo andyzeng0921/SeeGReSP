@@ -3,6 +3,7 @@ import threading
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
@@ -53,7 +54,7 @@ class RgbdShmBridge(Node):
     @staticmethod
     def _stream_config(stream):
         suffix = f'rgbd_head_{stream}'
-        return {
+        protocol_options = {
             'data_shm_name': f'/camera_image_buffer_{suffix}',
             'meta_shm_name': f'/camera_metadata_struct_{suffix}',
             'read_mutex_name': f'/read_mutex_lock_{suffix}',
@@ -61,10 +62,20 @@ class RgbdShmBridge(Node):
             'writer_queue_name': f'/writer_queue_sem_{suffix}',
             'intrinsics_shm_name': f'/camera_intrinsics_struct_{suffix}',
         }
+        return {
+            'selected_protocol': 'v1',
+            'protocols': {
+                'v1': protocol_options,
+            },
+        }
 
     def _ensure_open(self):
         if self._color_consumer is not None and self._depth_consumer is not None:
             return
+        # Load the project venv's working torch before adding the vendor path.
+        # robot_env currently contains a broken absolute libtorch symlink, while
+        # the camera SHM module only needs the already-loaded torch runtime.
+        import torch  # noqa: F401
         vendor_path = str(self.get_parameter('vendor_python_path').value)
         if vendor_path and vendor_path not in sys.path:
             sys.path.insert(0, vendor_path)
@@ -84,7 +95,7 @@ class RgbdShmBridge(Node):
                 self._intrinsics = intrinsics
                 self._last_error = ''
             self.get_logger().info(
-                'RGB-D SHM opened: 640x480 aligned depth, '
+                'RGB-D SHM opened: aligned depth, '
                 f'fx={intrinsics["fx"]:.3f}, fy={intrinsics["fy"]:.3f}'
             )
         except Exception as exc:
@@ -121,7 +132,9 @@ class RgbdShmBridge(Node):
             self._published_frames += 1
             if self._published_frames == 1:
                 self.get_logger().info(
-                    f'published first aligned RGB-D pair (frame delta={color_id - depth_id})'
+                    f'published first aligned RGB-D pair '
+                    f'({color_frame.shape[1]}x{color_frame.shape[0]}, '
+                    f'frame delta={color_id - depth_id})'
                 )
             self._pending_color = None
             self._pending_depth = None
@@ -198,7 +211,7 @@ def main(args=None):
     node = RgbdShmBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

@@ -17,6 +17,8 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from adaptive_object_grasping.msg import GraspCandidate, GraspCandidateArray
 from adaptive_object_grasping.srv import EstimateGrasps
 from adaptive_object_grasping_nodes.graspnet_core import (
+    apply_grasp_depth_offset,
+    is_horizontal_grasp,
     matrix_to_quaternion,
     parse_grasp_array,
     sample_point_cloud,
@@ -107,6 +109,8 @@ class GraspNetServer(Node):
         self.declare_parameter('color_topic', '/head_camera/color/image_raw')
         self.declare_parameter('depth_topic', '/head_camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic', '/head_camera/color/camera_info')
+        self.declare_parameter('selected_mask_topic', '/selected_object_mask')
+        self.declare_parameter('use_selected_mask', False)
         self.declare_parameter('base_frame', 'Link_Zero_Point')
         self.declare_parameter('graspnet_root', 'third_party/graspnet-baseline')
         self.declare_parameter('checkpoint_path', 'models/graspnet/checkpoint-rs.tar')
@@ -117,13 +121,24 @@ class GraspNetServer(Node):
         self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('target_depth_band', 0.08)
         self.declare_parameter('collision_threshold', 0.01)
+        self.declare_parameter('auto_arm_deadband_y', 0.04)
+        self.declare_parameter('prevent_cross_body_grasps', True)
         self.declare_parameter('collision_voxel_size', 0.01)
         self.declare_parameter('minimum_grasp_score', 0.25)
         self.declare_parameter('maximum_gripper_width', 0.10)
         self.declare_parameter('maximum_candidates', 20)
+        self.declare_parameter('maximum_raw_candidates', 100)
         self.declare_parameter('inference_attempts', 3)
         self.declare_parameter('pregrasp_offset', 0.12)
         self.declare_parameter('approach_axis', 0)
+        self.declare_parameter('horizontal_grasp_filter_enabled', True)
+        self.declare_parameter('closing_axis', 1)
+        self.declare_parameter('vertical_axis', 2)
+        self.declare_parameter('maximum_approach_tilt_degrees', 15.0)
+        self.declare_parameter('maximum_closing_tilt_degrees', 15.0)
+        self.declare_parameter('apply_grasp_depth', True)
+        self.declare_parameter('grasp_depth_scale', 1.0)
+        self.declare_parameter('maximum_grasp_depth_offset', 0.05)
         self.declare_parameter('tf_timeout', 0.2)
 
         self._data_lock = threading.Lock()
@@ -131,6 +146,7 @@ class GraspNetServer(Node):
         self._color = None
         self._depth = None
         self._intrinsics = None
+        self._selected_mask = None
         self._backend = None
         self._backend_error = ''
         self._tf_buffer = Buffer()
@@ -146,6 +162,12 @@ class GraspNetServer(Node):
             CameraInfo,
             str(self.get_parameter('camera_info_topic').value),
             self._on_info,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            Image,
+            str(self.get_parameter('selected_mask_topic').value),
+            self._on_selected_mask,
             qos_profile_sensor_data,
         )
         self.create_service(EstimateGrasps, 'estimate_grasps', self._estimate)
@@ -172,6 +194,14 @@ class GraspNetServer(Node):
         with self._data_lock:
             self._intrinsics = intrinsics
 
+    def _on_selected_mask(self, message):
+        try:
+            mask = image_buffer_to_array(message) > 0
+            with self._data_lock:
+                self._selected_mask = mask
+        except Exception as exc:
+            self.get_logger().warning(f'selected mask rejected: {exc}')
+
     def _load_backend(self):
         if self._backend is not None:
             return self._backend
@@ -192,6 +222,11 @@ class GraspNetServer(Node):
             color = None if self._color is None else self._color.copy()
             depth = None if self._depth is None else self._depth.copy()
             intrinsics = self._intrinsics
+            selected_mask = (
+                None
+                if not bool(self.get_parameter('use_selected_mask').value) or self._selected_mask is None
+                else self._selected_mask.copy()
+            )
         if color is None or depth is None or intrinsics is None:
             response.message = 'RGB-D frame or camera intrinsics unavailable'
             return response
@@ -207,6 +242,7 @@ class GraspNetServer(Node):
             box,
             intrinsics,
             target_depth=request.target.median_depth,
+            mask=selected_mask,
             depth_scale=float(self.get_parameter('depth_scale').value),
             depth_band=float(self.get_parameter('target_depth_band').value),
         )
@@ -239,7 +275,7 @@ class GraspNetServer(Node):
                         scene_points,
                         float(self.get_parameter('collision_threshold').value),
                         float(self.get_parameter('collision_voxel_size').value),
-                        int(self.get_parameter('maximum_candidates').value),
+                        int(self.get_parameter('maximum_raw_candidates').value),
                     )
                     if len(rows):
                         break
@@ -253,7 +289,14 @@ class GraspNetServer(Node):
             return response
         response.candidates = candidates
         response.success = bool(candidates)
-        response.message = f'generated {len(candidates)} collision-filtered grasp candidates'
+        response.message = (
+            f'generated {len(candidates)} grasp candidates from {len(rows)} raw rows '
+            f'(minimum_score={float(self.get_parameter("minimum_grasp_score").value):.3f}, '
+            f'maximum_width={float(self.get_parameter("maximum_gripper_width").value):.3f}m, '
+            f'collision_threshold={float(self.get_parameter("collision_threshold").value):.3f}, '
+            f'horizontal_filter='
+            f'{bool(self.get_parameter("horizontal_grasp_filter_enabled").value)})'
+        )
         self._publish_candidates(request.target, candidates)
         return response
 
@@ -264,8 +307,25 @@ class GraspNetServer(Node):
         tf_quaternion = [rotation.x, rotation.y, rotation.z, rotation.w]
         minimum_score = float(self.get_parameter('minimum_grasp_score').value)
         maximum_width = float(self.get_parameter('maximum_gripper_width').value)
+        maximum_candidates = int(self.get_parameter('maximum_candidates').value)
         axis = int(self.get_parameter('approach_axis').value)
+        horizontal_filter = bool(
+            self.get_parameter('horizontal_grasp_filter_enabled').value
+        )
+        closing_axis = int(self.get_parameter('closing_axis').value)
+        vertical_axis = int(self.get_parameter('vertical_axis').value)
+        maximum_approach_tilt = float(
+            self.get_parameter('maximum_approach_tilt_degrees').value
+        )
+        maximum_closing_tilt = float(
+            self.get_parameter('maximum_closing_tilt_degrees').value
+        )
         offset = float(self.get_parameter('pregrasp_offset').value)
+        apply_depth = bool(self.get_parameter('apply_grasp_depth').value)
+        depth_scale = float(self.get_parameter('grasp_depth_scale').value)
+        maximum_depth_offset = float(
+            self.get_parameter('maximum_grasp_depth_offset').value
+        )
         candidates = []
         for row in rows:
             grasp = parse_grasp_array(row)
@@ -274,11 +334,30 @@ class GraspNetServer(Node):
             position, grasp_rotation = transform_grasp_pose(
                 grasp['translation'], grasp['rotation'], tf_translation, tf_quaternion
             )
+            if horizontal_filter:
+                accepted, _, _ = is_horizontal_grasp(
+                    grasp_rotation,
+                    approach_axis=axis,
+                    closing_axis=closing_axis,
+                    vertical_axis=vertical_axis,
+                    maximum_approach_tilt_degrees=maximum_approach_tilt,
+                    maximum_closing_tilt_degrees=maximum_closing_tilt,
+                )
+                if not accepted:
+                    continue
             approach = grasp_rotation[:, axis]
-            pregrasp = position - approach * offset
-            arm = request.preferred_arm
-            if arm not in ('left', 'right'):
-                arm = 'left' if position[1] >= 0.0 else 'right'
+            grasp_position = position
+            if apply_depth:
+                grasp_position, _ = apply_grasp_depth_offset(
+                    position,
+                    grasp_rotation,
+                    axis,
+                    grasp['depth'],
+                    depth_scale,
+                    maximum_depth_offset,
+                )
+            pregrasp = grasp_position - approach * offset
+            arm = self._select_arm(request.preferred_arm, grasp_position[1])
             message = GraspCandidate()
             message.header = request.target.header
             message.header.frame_id = str(self.get_parameter('base_frame').value)
@@ -290,10 +369,26 @@ class GraspNetServer(Node):
             message.grasp_depth = grasp['depth']
             message.grasp_height = grasp['height']
             quaternion = matrix_to_quaternion(grasp_rotation)
-            self._fill_pose(message.grasp_pose, position, quaternion)
+            self._fill_pose(message.grasp_pose, grasp_position, quaternion)
             self._fill_pose(message.pregrasp_pose, pregrasp, quaternion)
             candidates.append(message)
+            if len(candidates) >= maximum_candidates:
+                break
         return candidates
+
+    def _select_arm(self, requested_arm, base_y):
+        arm = requested_arm if requested_arm in ('left', 'right') else 'auto'
+        deadband = abs(float(self.get_parameter('auto_arm_deadband_y').value))
+        prevent_cross_body = bool(self.get_parameter('prevent_cross_body_grasps').value)
+        object_side = 'left' if base_y > deadband else 'right' if base_y < -deadband else 'auto'
+        if object_side == 'auto':
+            return arm if arm in ('left', 'right') else 'left'
+        if prevent_cross_body and arm in ('left', 'right') and arm != object_side:
+            self.get_logger().warning(
+                f'corrected requested arm {arm} to {object_side}: target base_y={base_y:.3f}m'
+            )
+            return object_side
+        return arm if arm in ('left', 'right') else object_side
 
     def _fill_pose(self, message, position, quaternion):
         message.header.stamp = self.get_clock().now().to_msg()

@@ -26,7 +26,7 @@ class PbvsServo(Node):
     def __init__(self):
         super().__init__('pbvs_target_servo')
         self.declare_parameter('base_frame', 'Link_Zero_Point')
-        self.declare_parameter('eef_pose_topic', '/topic_arm_current_robot_eef_pose_0_283')
+        self.declare_parameter('eef_pose_topic', '/topic_arm_current_robot_eef_pose_0_306')
         self.declare_parameter('required_stable_duration', 1.5)
         self.declare_parameter('stable_motion_threshold', 0.012)
         self.declare_parameter('maximum_follow_distance', 0.25)

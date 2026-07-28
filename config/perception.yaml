@@ -3,10 +3,11 @@ yolo_object_tracker:
     color_topic: /head_camera/color/image_raw
     depth_topic: /head_camera/aligned_depth_to_color/image_raw
     camera_info_topic: /head_camera/color/camera_info
-    model: models/yolo/yolo11n-seg.pt
+    selected_mask_topic: /selected_object_mask
+    model: models/yolo/yolo11n.pt
     tracker: bytetrack.yaml
-    device: '0'
-    image_size: 640
+    device: auto
+    image_size: 1280
     confidence_threshold: 0.35
     iou_threshold: 0.55
     maximum_inference_rate: 30.0

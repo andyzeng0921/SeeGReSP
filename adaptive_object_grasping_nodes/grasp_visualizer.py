@@ -1,5 +1,6 @@
 import math
 import threading
+import time
 
 import numpy as np
 import rclpy
@@ -16,6 +17,7 @@ from adaptive_object_grasping.msg import (
     TrackedObject,
     TrackedObjectArray,
 )
+from adaptive_object_grasping_nodes.pbvs_core import quaternion_matrix
 from adaptive_object_grasping_nodes.perception_core import image_buffer_to_array
 
 
@@ -33,6 +35,7 @@ class GraspVisualizer(Node):
         self.declare_parameter('color_topic', '/head_camera/color/image_raw')
         self.declare_parameter('objects_topic', 'tracked_objects')
         self.declare_parameter('selected_topic', 'selected_object')
+        self.declare_parameter('selected_mask_topic', '/selected_object_mask')
         self.declare_parameter('candidates_topic', 'grasp_candidates')
         self.declare_parameter('status_topic', 'motion_execution_status')
         self.declare_parameter('overlay_topic', '/adaptive_grasp/visualization_image')
@@ -43,16 +46,20 @@ class GraspVisualizer(Node):
         self.declare_parameter('gripper_width_scale', 1.0)
         self.declare_parameter('axis_length', 0.08)
         self.declare_parameter('line_width', 0.01)
+        self.declare_parameter('maximum_overlay_rate', 10.0)
+        self.declare_parameter('show_only_selected_mask', True)
 
         self._lock = threading.Lock()
         self._objects = []
         self._selected = None
+        self._selected_mask = None
         self._candidates = []
         self._candidate_header = None
         self._status = ''
+        self._last_overlay_time = 0.0
 
         self._overlay_pub = self.create_publisher(
-            Image, str(self.get_parameter('overlay_topic').value), 10
+            Image, str(self.get_parameter('overlay_topic').value), qos_profile_sensor_data
         )
         self._marker_pub = self.create_publisher(
             MarkerArray, str(self.get_parameter('marker_topic').value), 10
@@ -74,6 +81,12 @@ class GraspVisualizer(Node):
             str(self.get_parameter('selected_topic').value),
             self._on_selected,
             10,
+        )
+        self.create_subscription(
+            Image,
+            str(self.get_parameter('selected_mask_topic').value),
+            self._on_selected_mask,
+            qos_profile_sensor_data,
         )
         self.create_subscription(
             GraspCandidateArray,
@@ -104,6 +117,14 @@ class GraspVisualizer(Node):
         with self._lock:
             self._selected = message
 
+    def _on_selected_mask(self, message):
+        try:
+            mask = image_buffer_to_array(message) > 0
+            with self._lock:
+                self._selected_mask = mask
+        except Exception as exc:
+            self.get_logger().warning(f'selected mask rejected: {exc}')
+
     def _on_candidates(self, message):
         with self._lock:
             self._candidate_header = message.header
@@ -115,6 +136,11 @@ class GraspVisualizer(Node):
             self._status = message.data
 
     def _on_color(self, message):
+        maximum_rate = max(1.0, float(self.get_parameter('maximum_overlay_rate').value))
+        now = time.monotonic()
+        if now - self._last_overlay_time < 1.0 / maximum_rate:
+            return
+        self._last_overlay_time = now
         try:
             image = image_buffer_to_array(message)
         except Exception as exc:
@@ -123,13 +149,26 @@ class GraspVisualizer(Node):
         with self._lock:
             objects = list(self._objects)
             selected = self._selected
+            selected_mask = None if self._selected_mask is None else self._selected_mask.copy()
             candidates = list(self._candidates)
             status = self._status
-        overlay = self._draw_overlay(image, objects, selected, candidates, status)
+        overlay = self._draw_overlay(image, objects, selected, selected_mask, candidates, status)
         self._overlay_pub.publish(self._image_message(message, overlay))
 
-    def _draw_overlay(self, image, objects, selected, candidates, status):
+    def _draw_overlay(self, image, objects, selected, selected_mask, candidates, status):
         output = image.copy()
+        if (
+            bool(self.get_parameter('show_only_selected_mask').value)
+            and selected is not None
+            and selected_mask is not None
+        ):
+            if selected_mask.shape != output.shape[:2]:
+                from adaptive_object_grasping_nodes.perception_core import resize_mask_nearest
+
+                selected_mask = resize_mask_nearest(selected_mask, output.shape[0], output.shape[1])
+            isolated = np.zeros_like(output)
+            isolated[selected_mask] = output[selected_mask]
+            output = isolated
         selected_id = selected.track_id if selected is not None else None
         draw_all = bool(self.get_parameter('draw_all_objects').value)
         for item in objects:
@@ -202,7 +241,8 @@ class GraspVisualizer(Node):
             self._marker_pub.publish(markers)
             return
         maximum = int(self.get_parameter('maximum_markers').value)
-        for index, candidate in enumerate(candidates[:maximum]):
+        ranked_candidates = sorted(candidates, key=lambda item: item.score, reverse=True)
+        for index, candidate in enumerate(ranked_candidates[:maximum]):
             markers.markers.extend(self._candidate_markers(candidate, index))
         if selected is not None and selected.depth_valid:
             markers.markers.append(self._selected_object_marker(selected, len(markers.markers)))
@@ -246,7 +286,7 @@ class GraspVisualizer(Node):
                 candidate.grasp_pose.header,
                 ns,
                 index * 10 + 2,
-                pose.position,
+                pose,
                 width,
                 depth,
                 color,
@@ -305,15 +345,25 @@ class GraspVisualizer(Node):
         marker.lifetime = lifetime
         return marker
 
-    def _gripper(self, header, ns, marker_id, center, width, depth, color, lifetime):
+    def _gripper(self, header, ns, marker_id, pose, width, depth, color, lifetime):
         half = width * 0.5
         jaw = min(0.055, max(0.025, depth))
-        points = [
-            Point(x=center.x, y=center.y - half, z=center.z),
-            Point(x=center.x + jaw, y=center.y - half, z=center.z),
-            Point(x=center.x, y=center.y + half, z=center.z),
-            Point(x=center.x + jaw, y=center.y + half, z=center.z),
-        ]
+        # GraspNet poses use local X as approach/depth and local Y as gripper width.
+        local_points = np.array([
+            [jaw, -half, 0.0],
+            [0.0, -half, 0.0],
+            [0.0, half, 0.0],
+            [jaw, half, 0.0],
+        ], dtype=np.float64)
+        rotation = quaternion_matrix([
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        ])
+        center = np.array([pose.position.x, pose.position.y, pose.position.z], dtype=np.float64)
+        rotated = local_points @ rotation.T + center
+        points = [Point(x=float(item[0]), y=float(item[1]), z=float(item[2])) for item in rotated]
         return self._line(header, ns, marker_id, points, color, lifetime)
 
     def _text_marker(self, header, ns, marker_id, point, text, color, lifetime):

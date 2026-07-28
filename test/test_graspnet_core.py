@@ -1,6 +1,9 @@
 import numpy as np
 
 from adaptive_object_grasping_nodes.graspnet_core import (
+    apply_grasp_depth_offset,
+    axis_tilt_from_horizontal_degrees,
+    is_horizontal_grasp,
     matrix_to_quaternion,
     parse_grasp_array,
     sample_point_cloud,
@@ -46,3 +49,59 @@ def test_parse_and_transform_grasp_row():
     np.testing.assert_allclose(position, [1.1, 0.2, 0.3])
     np.testing.assert_allclose(rotation, np.eye(3))
     np.testing.assert_allclose(matrix_to_quaternion(rotation), [0.0, 0.0, 0.0, 1.0])
+
+
+def test_grasp_depth_moves_final_pose_along_approach_axis():
+    rotation = np.array([
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    shifted, applied = apply_grasp_depth_offset(
+        [0.5, 0.1, 0.8], rotation, 0, 0.03, scale=1.0, maximum=0.05
+    )
+    np.testing.assert_allclose(shifted, [0.5, 0.13, 0.8])
+    assert applied == 0.03
+
+
+def test_grasp_depth_offset_is_safety_clamped():
+    shifted, applied = apply_grasp_depth_offset(
+        [0.0, 0.0, 0.0], np.eye(3), 0, 0.20, scale=1.0, maximum=0.05
+    )
+    np.testing.assert_allclose(shifted, [0.05, 0.0, 0.0])
+    assert applied == 0.05
+
+
+def test_horizontal_grasp_accepts_horizontal_approach_and_closing_axes():
+    accepted, approach_tilt, closing_tilt = is_horizontal_grasp(np.eye(3))
+    assert accepted
+    assert approach_tilt == 0.0
+    assert closing_tilt == 0.0
+
+
+def test_horizontal_grasp_rejects_vertical_closing_axis():
+    rotation = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 1.0, 0.0],
+    ])
+    accepted, approach_tilt, closing_tilt = is_horizontal_grasp(rotation)
+    assert not accepted
+    assert approach_tilt == 0.0
+    assert closing_tilt == 90.0
+
+
+def test_horizontal_tilt_threshold_allows_small_angle():
+    angle = np.radians(10.0)
+    rotation = np.array([
+        [np.cos(angle), 0.0, -np.sin(angle)],
+        [0.0, 1.0, 0.0],
+        [np.sin(angle), 0.0, np.cos(angle)],
+    ])
+    assert np.isclose(axis_tilt_from_horizontal_degrees(rotation, 0), 10.0)
+    accepted, _, _ = is_horizontal_grasp(
+        rotation,
+        maximum_approach_tilt_degrees=15.0,
+        maximum_closing_tilt_degrees=15.0,
+    )
+    assert accepted
