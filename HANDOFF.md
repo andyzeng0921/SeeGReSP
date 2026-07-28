@@ -102,6 +102,9 @@ tools/graspctl.sh execute bottle auto I_HAVE_CHECKED_ESTOP_AND_WORKSPACE
 
 - 通用性取决于检测模型类别；默认 COCO 模型能识别 bottle/cup 等，未知物体
   需替换兼容的实例分割权重或接入开放词汇检测器。
+- 干运行 IK 已通过，但 MoveIt 日志仍提示没有配置
+  `moveit_controller_manager`。在将厂商轨迹控制器完整映射到 MoveIt 并做现场
+  空载验证前，不得开启真实轨迹执行。
 - GraspNet 权重限其上游许可范围使用。
 - 当前外参/TCP 是名义或既有实测值，不能替代每台机器人现场标定。
 - OpenClaw 是决策入口，不进入实时控制环；确定性的 ROS 节点承担感知、规划
@@ -116,4 +119,12 @@ tools/graspctl.sh execute bottle auto I_HAVE_CHECKED_ESTOP_AND_WORKSPACE
   夹爪需求宽度约 0.0888 m；IK dry-run 通过，未发送硬件命令。
 - OpenClaw 2026.7.2 构建成功，`visual-grasping` skill 状态为
   `eligible=true`、`modelVisible=true`。
+- 二次在线复测修复了厂商 SDK `utils` 初始化时误加载不兼容
+  `torchaudio`、导致 RGB-D 共享内存桥停发的问题。修复后 RGB 与对齐深度以
+  1280x720、帧差 0 持续发布，硬件健康检查全部通过。
+- 二次复测画面识别到 `bottle`：置信度约 0.929，深度约 0.531 m；
+  单一 action server 下完整规划成功，GraspNet 分数约 0.267，选择左臂，
+  夹爪需求宽度约 0.0739 m；IK dry-run 通过，未发送硬件命令。
+- `graspctl.sh` 现在按整个 `setsid` 进程组检查和停止服务，避免 launch
+  进程提前退出后残留 ROS 节点、继而产生重复 action server。
 - 验收结束后已停止本项目栈；厂商 arm/vision 基础服务保持原状。

@@ -31,7 +31,13 @@ valid_label() {
 }
 
 stack_running() {
-  [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+  [[ -f "$PIDFILE" ]] || return 1
+  local pgid
+  pgid="$(cat "$PIDFILE")"
+  [[ "$pgid" =~ ^[1-9][0-9]*$ ]] || return 1
+  # The setsid leader can exit before ros2 launch children. Check the whole
+  # process group so a later start cannot create duplicate ROS action servers.
+  kill -0 -- "-$pgid" 2>/dev/null
 }
 
 case "${1:-help}" in
@@ -47,8 +53,9 @@ case "${1:-help}" in
     ;;
   stop)
     if stack_running; then
-      kill -- "-$(cat "$PIDFILE")"
-      echo "Stopped grasp stack PID $(cat "$PIDFILE")."
+      pgid="$(cat "$PIDFILE")"
+      kill -- "-$pgid"
+      echo "Stopped grasp stack process group $pgid."
     else
       echo "Grasp stack is not running."
     fi

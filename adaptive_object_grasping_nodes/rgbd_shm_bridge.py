@@ -1,5 +1,7 @@
+import importlib
 import sys
 import threading
+import types
 
 import numpy as np
 import rclpy
@@ -72,15 +74,28 @@ class RgbdShmBridge(Node):
     def _ensure_open(self):
         if self._color_consumer is not None and self._depth_consumer is not None:
             return
-        # Load the project venv's working torch before adding the vendor path.
-        # robot_env currently contains a broken absolute libtorch symlink, while
-        # the camera SHM module only needs the already-loaded torch runtime.
-        import torch  # noqa: F401
         vendor_path = str(self.get_parameter('vendor_python_path').value)
         if vendor_path and vendor_path not in sys.path:
             sys.path.insert(0, vendor_path)
         try:
-            from autolife_robot_sdk.utils.camera_shm import SHMCameraFrameConsumer
+            # Import camera_shm without executing autolife_robot_sdk.utils.__init__.
+            # That initializer eagerly imports the audio/VAD stack, whose torchaudio
+            # build is incompatible with the project venv's torch. The camera SHM
+            # extension itself has no audio or torch dependency.
+            import autolife_robot_sdk
+
+            utils_name = 'autolife_robot_sdk.utils'
+            camera_module_name = f'{utils_name}.camera_shm'
+            if camera_module_name not in sys.modules:
+                utils_package = types.ModuleType(utils_name)
+                utils_package.__package__ = utils_name
+                utils_package.__path__ = [
+                    f'{vendor_path}/autolife_robot_sdk/utils',
+                ]
+                sys.modules[utils_name] = utils_package
+                setattr(autolife_robot_sdk, 'utils', utils_package)
+            camera_shm = importlib.import_module(camera_module_name)
+            SHMCameraFrameConsumer = camera_shm.SHMCameraFrameConsumer
 
             color = SHMCameraFrameConsumer(self._stream_config('color'), name='rgbd_color')
             depth = SHMCameraFrameConsumer(self._stream_config('depth'), name='rgbd_depth')
