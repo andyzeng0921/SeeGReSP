@@ -1,44 +1,80 @@
-# Robot 306 视觉抓取交接
+# Robot 306 视觉抓取 V2 交接
 
-## 已交付链路
+更新时间：2026-07-30
 
-`RealSense D435i RGB + 对齐深度 -> YOLO11 分割/ByteTrack -> 掩膜内稳健深度
--> 相机三维点 -> TF 到 Link_Zero_Point -> GraspNet 6D 候选 -> TCP 换算
--> MoveIt 2 / 厂商 IK、FK、RRT -> 双臂轨迹 -> 平行夹爪 -> 抬升`
+## 结论
 
-自然语言入口为 OpenClaw workspace：
-`agent_workspace/skills/visual-grasping/SKILL.md`。它把“抓一瓶水”等 prompt
-映射到检测类别，并且默认只做 dry-run。
+V2 已把感知快照、抓取推理、目标重验证、MoveIt 规划和厂商执行边界拆开，并默认
+fail closed。本轮没有向机械臂发送任何运动或夹爪命令。
 
-## 关键硬件
+服务器唯一工作目录：
 
-- 主机：AutoLife Robot 306，Ubuntu 24.04，ROS 2 Jazzy
-- GPU：RTX 4090 Laptop 16 GB
-- RGB-D：Intel RealSense D435i，序列号 `261822074480`
-- 机械臂：AutoLife robot_v2_2，左右各 7 DoF，厂商 ROS 服务后缀 `0_306`
-- 夹爪：左右平行夹爪，厂商位置范围约 0（开）到 360（闭）
+```text
+/home/ubuntu/zeng-Visual Grasping
+```
 
-## 来源与固定版本
+本轮修改前备份：
 
-- GraspNet baseline：`https://github.com/graspnet/graspnet-baseline`，
-  commit `280c215129f759ed8649cb4e89fc5dfee55f4f80`
-- OpenClaw：`https://github.com/openclaw/openclaw`，
-  commit `d0669429d857e4cd2cfc39b030095c5424f0b94f`
-- Ultralytics YOLO：包内独立 venv，模型 `models/yolo/yolo11n-seg.pt`
-- GraspNet RealSense 权重：
-  `models/graspnet/checkpoint-rs.tar`
+```text
+/home/ubuntu/zeng-Visual Grasping/runtime/backups/pre-architecture-v2-20260730-153500.tar.gz
+```
 
-厂商机械臂 SDK 是机器人预装的 `autolife_robot_arm 2.2.3+build3`，控制代码
-使用其官方话题、IK、FK 和全身 RRT 服务。
+## 已完成
 
-## 构建与测试
+1. 固化 AutoLife S2 左 7 + 右 7 关节契约，以及厂商腰腿 4 + 双臂 14 的
+   18 值轨迹顺序。
+2. `MotionExecutor` 成为唯一硬件出口：执行互斥、精确确认令牌、现场验收、
+   新鲜硬件状态和执行配置缺一不可。
+3. 真实执行只允许 `moveit_py_vendor_execution`。厂商 RRT/末端位姿后端只可
+   dry-run；PBVS 硬件直发已移除。
+4. 任一硬件命令发布后若响应超时或异常，锁存 unknown-motion fault；进程内
+   无清除入口，后续请求全部拒绝。没有验证的软件 stop，实体急停始终是权威。
+5. 硬件探针严格检查 31/31 heartbeat、protection、self-collision、关节通信和
+   完整双 EEF 内容；探针 ready 本身永远不能解锁。
+6. 删除业务代码写厂商私有 `/dev/shm/pid_loop_state_*` 的行为。
+7. MoveIt `time_from_start` 被重采样到厂商 18 值轨迹，总时长不短于规划结果；
+   发布后只接受更新的双 EEF 反馈作为完成依据。
+8. YOLO 使用实例 mask，并把同一帧 RGB、depth、mask、内参原子写入项目内
+   observation store；GraspNet 通过受校验的令牌消费。
+9. GraspNet 启动时预加载并 GPU warm-up；场景点云先按目标附近裁剪，再以
+   1 cm 确定性体素化后进入官方碰撞检测。
+10. 推理后重新选择同一 track 的新帧，校验类别、frame、三维位移、bbox 中心和
+    IoU；验证通过后才更新时间戳并进入规划。
+11. 协调器区分 unavailable/timeout/error，关闭 cancel 竞态，拒绝空确认、
+    并发 goal 和 unknown-motion 状态下的新请求。
+12. 已在项目内隔离运行 robosuite 1.5.2 + MuJoCo 3.3.7 双 Panda 冒烟测试。
+
+## 当前验证事实
+
+- 完整 ROS 测试：72 tests，0 errors，0 failures，0 skipped。
+- 双 Panda：两个 `[7]` 关节 observation、14 维 action、10 个物理步，
+  `hardware_connected=false`。
+- 仿真结果：
+  `experiments/robosuite_dual_panda/smoke-result.json`
+- 结果 SHA256：
+  `6a73312d2b654eeae872176659c684d40ab617d552bae10cd07acb2b6b826600`
+- 现场只读探针最近一次为 expected=31、ready=31、lost=0、armed=true、
+  protection=NORMAL、self_collide=0，同时仍报告
+  `hardware_execution_locked=true`。
+- V2 热启动后代表性 GraspNet 总耗时约 0.284–0.578 s；裁剪/体素化把约
+  43 万点的场景降到约 6.5 千点后再做碰撞检测。
+
+当前杂乱且会变化的现场画面中，V2 曾到达碰撞过滤和目标重验证阶段，但没有得到
+一次满足全部新鲜度、碰撞、方向、宽度、重验证和 MoveIt 条件的完整成功 dry-run：
+目标有消失/移动，部分批次无候选，部分候选被安全过滤。这是诚实的当前状态，
+不能用 2026-07-28 的旧成功记录替代 V2 验收，也不应通过放宽阈值制造成功。
+
+## 操作
+
+构建和测试：
 
 ```bash
 cd "/home/ubuntu/zeng-Visual Grasping"
 bash tools/build_project.sh
+third_party/venv/bin/python tools/check_dual_arm_profile.py
 ```
 
-启动、检查、列出对象、规划瓶子抓取：
+无运动检查：
 
 ```bash
 tools/graspctl.sh start
@@ -46,33 +82,33 @@ tools/graspctl.sh status
 tools/graspctl.sh list
 tools/graspctl.sh plan bottle auto
 tools/graspctl.sh logs 200
-```
-
-停止仅停止本项目 launch，不停止厂商 arm/vision 服务：
-
-```bash
 tools/graspctl.sh stop
 ```
 
-## OpenClaw
+注意：
 
-源码及依赖全部在项目目录。首次或更新源码后：
+- 修改 `config/*.yaml` 后必须重新构建再启动。
+- `plan` 不发布运动命令，失败时查看日志中的 raw candidate 和各过滤计数。
+- `stop` 只停止本项目 ROS 栈，不是机器人急停。
+- 不要运行 `execute`，也不要更改执行锁。
+
+## 真机前仍必须完成
+
+1. 把桌面、货架、地面、机器人周边固定物注入 MoveIt PlanningScene。
+2. 用标定板完成相机外参实测并记录误差。
+3. 实测左右 TCP 位于两指夹持中心，完成夹爪反馈端点映射。
+4. 复核 MoveIt 关节限制、碰撞矩阵和 pregrasp/grasp/lift 连续起点。
+5. 现场验证实体急停：按下、停止、复位、重新使能，全程有人守急停。
+6. 在隔离工作区用轻质软物体、最低速度完成空载和单臂验收。
+7. 首次使用先从公开模板创建本地验收文件，再逐项填写并签署；名义 CAD/URDF
+   值不得标记为实测：
 
 ```bash
-bash tools/install_openclaw.sh
+cp config/site_acceptance.example.yaml config/site_acceptance.yaml
 ```
+8. 由现场负责人单独审阅执行配置和精确确认令牌后，才可安排真机试车。
 
-配置模型凭据后运行自然语言任务，例如：
-
-```bash
-tools/openclaw.sh "请识别桌面上的水瓶并完成抓取规划，不要让机械臂运动"
-```
-
-OpenClaw 未包含任何 API key。请按 `third_party/openclaw/docs` 配置所选模型。
-
-## 真机解锁（必须由现场人员完成）
-
-交付配置保持：
+完成以上事项前，保持：
 
 ```yaml
 dry_run: true
@@ -80,51 +116,20 @@ allow_hardware_execution: false
 enable_pbvs_hardware_follow: false
 ```
 
-真机动作前必须逐项完成：
-
-1. 用标定板复核头部相机外参，不可只依赖名义安装位姿。
-2. 复核左右 TCP 位于两指实际夹持中心。
-3. 清空桌面碰撞区；先用空夹爪和软质轻物体。
-4. RViz 检查预抓取、抓取、抬升三段轨迹。
-5. 现场一人守急停，速度保持当前 0.25 或更低。
-6. 手工把 `config/motion.yaml` 的 `dry_run` 改为 `false`、
-   `allow_hardware_execution` 改为 `true`，重启本项目栈。
-7. 先执行一次 `tools/graspctl.sh plan bottle auto`，确认成功后才执行：
-
-```bash
-tools/graspctl.sh execute bottle auto I_HAVE_CHECKED_ESTOP_AND_WORKSPACE
-```
-
-首次实机不要开启 PBVS 硬件跟随。任一相机、TF、关节、EEF、IK/FK/RRT
-检查失败时不得绕过。
-
 ## 已知限制
 
-- 通用性取决于检测模型类别；默认 COCO 模型能识别 bottle/cup 等，未知物体
-  需替换兼容的实例分割权重或接入开放词汇检测器。
-- 干运行 IK 已通过，但 MoveIt 日志仍提示没有配置
-  `moveit_controller_manager`。在将厂商轨迹控制器完整映射到 MoveIt 并做现场
-  空载验证前，不得开启真实轨迹执行。
-- GraspNet 权重限其上游许可范围使用。
-- 当前外参/TCP 是名义或既有实测值，不能替代每台机器人现场标定。
-- OpenClaw 是决策入口，不进入实时控制环；确定性的 ROS 节点承担感知、规划
-  和执行，避免 LLM 直接输出关节命令。
+- 当前是一臂抓取、另一臂保持；`Both_Arms` 组和双 Panda 仿真不等于实机原子
+  双臂协同。
+- 厂商没有标准 `FollowJointTrajectory`，18 值适配器不能逐点保留 MoveIt
+  速度/加速度。
+- 没有公开且经验证的软件 stop；已发轨迹的立即停止只能依赖实体急停。
+- 环境 PlanningScene 尚未完成，因此不能进行实机运动。
+- 默认 COCO 分割权重不能识别任意未知类别。
+- GraspNet baseline/权重受上游许可约束。
+- OpenClaw 只负责自然语言任务入口，不进入实时控制环，也不能直接生成关节命令。
 
-## 2026-07-28 验收记录
+## 历史记录说明
 
-- 目标目录独立 `colcon build` 成功，30 tests / 0 failures。
-- 在线硬件检查通过：RGB-D、内参、关节、EEF、相机 TF、左右 TCP 均在线。
-- 画面识别到 `bottle`：置信度约 0.835，深度约 0.604 m。
-- 完整 `execute:false` 规划成功：GraspNet 分数约 0.305，选择右臂，
-  夹爪需求宽度约 0.0888 m；IK dry-run 通过，未发送硬件命令。
-- OpenClaw 2026.7.2 构建成功，`visual-grasping` skill 状态为
-  `eligible=true`、`modelVisible=true`。
-- 二次在线复测修复了厂商 SDK `utils` 初始化时误加载不兼容
-  `torchaudio`、导致 RGB-D 共享内存桥停发的问题。修复后 RGB 与对齐深度以
-  1280x720、帧差 0 持续发布，硬件健康检查全部通过。
-- 二次复测画面识别到 `bottle`：置信度约 0.929，深度约 0.531 m；
-  单一 action server 下完整规划成功，GraspNet 分数约 0.267，选择左臂，
-  夹爪需求宽度约 0.0739 m；IK dry-run 通过，未发送硬件命令。
-- `graspctl.sh` 现在按整个 `setsid` 进程组检查和停止服务，避免 launch
-  进程提前退出后残留 ROS 节点、继而产生重复 action server。
-- 验收结束后已停止本项目栈；厂商 arm/vision 基础服务保持原状。
+`docs/LIVE_VALIDATION_ZH.md` 中的 2026-07-28 厂商 RRT/PBVS 和旧 dry-run 结果仅供
+追溯。V2 已改变接口、候选过滤、新鲜度语义和唯一执行后端；旧结果不是当前验收，
+旧解锁步骤不得使用。

@@ -1,0 +1,25 @@
+{
+  "action_dimension": 14,
+  "configuration": "parallel",
+  "environment": "TwoArmLift",
+  "expected_arm_dof": 7,
+  "framework": "robosuite",
+  "framework_version": "1.5.2",
+  "hardware_connected": false,
+  "initial_joint_shapes": [
+    [
+      7
+    ],
+    [
+      7
+    ]
+  ],
+  "passed": true,
+  "reward_max": 0.01996951906060031,
+  "reward_min": 0.019952075880683817,
+  "robots": [
+    "Panda",
+    "Panda"
+  ],
+  "steps": 10
+}

@@ -3,6 +3,7 @@ import numpy as np
 from adaptive_object_grasping_nodes.graspnet_core import (
     apply_grasp_depth_offset,
     axis_tilt_from_horizontal_degrees,
+    collision_scene_cloud,
     is_horizontal_grasp,
     matrix_to_quaternion,
     parse_grasp_array,
@@ -35,6 +36,27 @@ def test_sampling_repeats_when_cloud_is_small():
     )
     assert sampled_points.shape == (10, 3)
     assert sampled_colors.shape == (10, 3)
+
+
+def test_collision_scene_keeps_local_voxels_and_removes_far_geometry():
+    target = np.array(
+        [[0.0, 0.0, 1.0], [0.02, 0.02, 1.02]],
+        dtype=np.float32,
+    )
+    scene = np.array(
+        [
+            [0.00, 0.00, 1.00],
+            [0.001, 0.001, 1.001],
+            [0.10, 0.00, 1.00],
+            [1.00, 1.00, 1.00],
+        ],
+        dtype=np.float32,
+    )
+    local = collision_scene_cloud(
+        scene, target, margin=0.20, voxel_size=0.01
+    )
+    assert len(local) == 2
+    assert not np.any(np.all(np.isclose(local, [1.0, 1.0, 1.0]), axis=1))
 
 
 def test_parse_and_transform_grasp_row():

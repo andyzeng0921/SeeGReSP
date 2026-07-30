@@ -1,3 +1,5 @@
+import copy
+import os
 import threading
 import time
 
@@ -6,9 +8,13 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import String
+from std_msgs.msg import Header, String
 
-from adaptive_object_grasping.msg import TrackedObject, TrackedObjectArray
+from adaptive_object_grasping.msg import (
+    SelectedObjectObservation,
+    TrackedObject,
+    TrackedObjectArray,
+)
 from adaptive_object_grasping.srv import ListObjects, SelectObject
 from adaptive_object_grasping_nodes.perception_core import (
     CameraIntrinsics,
@@ -17,7 +23,15 @@ from adaptive_object_grasping_nodes.perception_core import (
     mask_to_image_message,
     object_depth_and_pixel,
     object_menu_lines,
-    resize_mask_nearest,
+)
+from adaptive_object_grasping_nodes.observation_store_core import (
+    resolve_store_directory,
+    write_observation,
+)
+from adaptive_object_grasping_nodes.perception_sync_core import (
+    ExactRgbdCache,
+    freshness_error,
+    stamp_nanoseconds,
 )
 
 
@@ -29,7 +43,7 @@ class YoloTracker(Node):
         self.declare_parameter('color_topic', '/head_camera/color/image_raw')
         self.declare_parameter('depth_topic', '/head_camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic', '/head_camera/color/camera_info')
-        self.declare_parameter('model', 'models/yolo/yolo11n.pt')
+        self.declare_parameter('model', 'models/yolo/yolo11n-seg.pt')
         self.declare_parameter('tracker', 'bytetrack.yaml')
         self.declare_parameter('device', 'auto')
         self.declare_parameter('image_size', 640)
@@ -41,21 +55,38 @@ class YoloTracker(Node):
         self.declare_parameter('maximum_depth', 2.5)
         self.declare_parameter('allowed_classes', ['*'])
         self.declare_parameter('selected_mask_topic', '/selected_object_mask')
+        self.declare_parameter('rgbd_cache_size', 16)
+        self.declare_parameter('maximum_observation_age_seconds', 0.50)
+        self.declare_parameter('maximum_selection_age_seconds', 0.35)
+        self.declare_parameter('maximum_future_skew_seconds', 0.02)
+        self.declare_parameter(
+            'observation_store_directory',
+            'runtime/selected_observations',
+        )
+        self.declare_parameter('maximum_observation_files', 32)
 
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
-        self._color = None
-        self._color_header = None
-        self._color_sequence = 0
-        self._depth = None
-        self._intrinsics = None
+        self._rgbd_cache = ExactRgbdCache(
+            int(self.get_parameter('rgbd_cache_size').value)
+        )
         self._objects = []
         self._object_masks = {}
+        self._observation_color = None
+        self._observation_depth = None
+        self._observation_intrinsics = None
+        self._objects_stamp_ns = 0
         self._selected_id = None
         self._model = None
         self._model_error = ''
         self._resolved_device = None
+        self._observation_store = resolve_store_directory(
+            os.environ.get('ADAPTIVE_GRASP_PACKAGE_ROOT', ''),
+            str(
+                self.get_parameter('observation_store_directory').value
+            ),
+        )
 
         self._objects_pub = self.create_publisher(TrackedObjectArray, 'tracked_objects', 10)
         self._selected_pub = self.create_publisher(TrackedObject, 'selected_object', 10)
@@ -109,29 +140,36 @@ class YoloTracker(Node):
     def _on_color(self, message):
         try:
             image = image_buffer_to_array(message)
+            self._cache_rgbd_component('color', message.header, image)
         except Exception as exc:
             self.get_logger().warning(f'color image rejected: {exc}')
-            return
-        with self._lock:
-            self._color = image
-            self._color_header = message.header
-            self._color_sequence += 1
-        self._wake.set()
 
     def _on_depth(self, message):
         try:
             depth = image_buffer_to_array(message)
+            self._cache_rgbd_component('depth', message.header, depth)
         except Exception as exc:
             self.get_logger().warning(f'depth image rejected: {exc}')
-            return
-        with self._lock:
-            self._depth = depth
 
     def _on_info(self, message):
-        with self._lock:
-            self._intrinsics = CameraIntrinsics(
+        try:
+            intrinsics = CameraIntrinsics(
                 float(message.k[0]), float(message.k[4]), float(message.k[2]), float(message.k[5])
             )
+            self._cache_rgbd_component('intrinsics', message.header, intrinsics)
+        except Exception as exc:
+            self.get_logger().warning(f'camera info rejected: {exc}')
+
+    def _cache_rgbd_component(self, stream, header, value):
+        with self._lock:
+            snapshot = self._rgbd_cache.add(
+                stream,
+                stamp_nanoseconds(header.stamp),
+                header.frame_id,
+                value,
+            )
+        if snapshot is not None:
+            self._wake.set()
 
     def _load_model(self):
         if self._model is not None:
@@ -139,9 +177,16 @@ class YoloTracker(Node):
         try:
             from ultralytics import YOLO
 
-            self._model = YOLO(str(self.get_parameter('model').value))
+            model = YOLO(str(self.get_parameter('model').value))
+            task = str(getattr(model, 'task', '')).strip().lower()
+            if task != 'segment':
+                raise RuntimeError(
+                    f'configured YOLO model task is {task or "unknown"}, '
+                    'but instance segmentation is required'
+                )
+            self._model = model
             self._model_error = ''
-            self.get_logger().info('YOLO model loaded')
+            self.get_logger().info('YOLO segmentation model loaded')
             return True
         except Exception as exc:
             error = str(exc)
@@ -153,29 +198,53 @@ class YoloTracker(Node):
             return False
 
     def _run_worker(self):
-        previous_sequence = -1
+        previous_stamp_ns = None
         maximum_rate = max(1.0, float(self.get_parameter('maximum_inference_rate').value))
         minimum_period = 1.0 / maximum_rate
         while not self._stop.is_set():
             self._wake.wait(timeout=0.5)
             self._wake.clear()
-            with self._lock:
-                sequence = self._color_sequence
-                color = None if self._color is None else self._color.copy()
-                header = self._color_header
-                depth = None if self._depth is None else self._depth.copy()
-                intrinsics = self._intrinsics
-            if color is None or header is None or sequence == previous_sequence:
-                continue
             started = time.monotonic()
             if not self._load_model():
                 self._stop.wait(2.0)
                 continue
-            previous_sequence = sequence
+            # Loading and warming a model can take seconds. Reacquire the
+            # newest complete frame only after the model is ready.
+            with self._lock:
+                snapshot = self._rgbd_cache.latest(
+                    after_stamp_ns=previous_stamp_ns
+                )
+            if snapshot is None:
+                continue
+            previous_stamp_ns = snapshot.stamp_ns
+            color = np.asarray(snapshot.color).copy()
+            depth = np.asarray(snapshot.depth).copy()
+            intrinsics = snapshot.intrinsics
+            header = self._header(snapshot.stamp_ns, snapshot.frame_id)
             try:
                 result = self._infer(color)
-                objects, masks_by_id = self._messages_from_result(result, header, depth, intrinsics, color.shape[:2])
-                self._publish_objects(header, objects, masks_by_id)
+                objects, masks_by_id = self._messages_from_result(
+                    result,
+                    header,
+                    depth,
+                    intrinsics,
+                    color.shape[:2],
+                )
+                age_error = self._freshness_error(snapshot.stamp_ns)
+                if age_error:
+                    self.get_logger().warning(
+                        'discarding YOLO result because its RGB-D frame became '
+                        f'stale during inference: {age_error}'
+                    )
+                    objects, masks_by_id = [], {}
+                self._publish_objects(
+                    header,
+                    objects,
+                    masks_by_id,
+                    color,
+                    depth,
+                    intrinsics,
+                )
             except Exception as exc:
                 self.get_logger().error(f'YOLO inference failed: {exc}')
             remaining = minimum_period - (time.monotonic() - started)
@@ -191,6 +260,7 @@ class YoloTracker(Node):
             iou=float(self.get_parameter('iou_threshold').value),
             imgsz=int(self.get_parameter('image_size').value),
             device=self._resolve_device(),
+            retina_masks=True,
             verbose=False,
         )
         return results[0]
@@ -207,9 +277,22 @@ class YoloTracker(Node):
             if ids is not None
             else np.arange(len(boxes), dtype=int) + 100000
         )
-        masks = None
-        if result.masks is not None and result.masks.data is not None:
-            masks = result.masks.data.detach().cpu().numpy()
+        if result.masks is None or result.masks.data is None:
+            raise ValueError(
+                'segmentation model returned boxes without instance masks'
+            )
+        masks = result.masks.data.detach().cpu().numpy()
+        if masks.ndim != 3 or tuple(masks.shape[1:]) != tuple(image_shape):
+            raise ValueError(
+                f'instance masks have shape {masks.shape}; expected '
+                f'(N, {image_shape[0]}, {image_shape[1]}). '
+                'retina_masks=True must preserve original image coordinates'
+            )
+        if len(masks) != len(boxes):
+            raise ValueError(
+                f'instance mask count {len(masks)} does not match '
+                f'box count {len(boxes)}'
+            )
         allowed = {str(value).lower() for value in self.get_parameter('allowed_classes').value}
         if '*' in allowed:
             allowed.clear()
@@ -232,11 +315,8 @@ class YoloTracker(Node):
             message.bbox_y = int(round(y1))
             message.bbox_width = max(1, int(round(x2 - x1)))
             message.bbox_height = max(1, int(round(y2 - y1)))
-            mask = None if masks is None or index >= len(masks) else masks[index]
-            if mask is not None:
-                masks_by_id[int(track_id)] = resize_mask_nearest(
-                    np.asarray(mask), int(image_shape[0]), int(image_shape[1])
-                )
+            mask = np.asarray(masks[index]) > 0.5
+            masks_by_id[int(track_id)] = mask.copy()
             if depth is not None and intrinsics is not None:
                 sample = object_depth_and_pixel(
                     depth,
@@ -257,26 +337,52 @@ class YoloTracker(Node):
             messages.append(message)
         return messages, masks_by_id
 
-    def _publish_objects(self, header, objects, masks_by_id):
+    def _publish_objects(
+        self,
+        header,
+        objects,
+        masks_by_id,
+        color,
+        depth,
+        intrinsics,
+    ):
         array = TrackedObjectArray()
-        array.header = header
+        array.header = copy.deepcopy(header)
         array.objects = objects
         with self._lock:
             self._objects = objects
             self._object_masks = masks_by_id
+            self._observation_color = color
+            self._observation_depth = depth
+            self._observation_intrinsics = intrinsics
+            self._objects_stamp_ns = stamp_nanoseconds(header.stamp)
             selected = next(
                 (item for item in objects if item.track_id == self._selected_id), None
+            )
+            selected = None if selected is None else copy.deepcopy(selected)
+            selected_mask = (
+                None
+                if selected is None
+                else masks_by_id.get(selected.track_id)
+            )
+            selected_mask = (
+                None if selected_mask is None else selected_mask.copy()
             )
         self._objects_pub.publish(array)
         if selected is not None:
             self._selected_pub.publish(selected)
-            mask = masks_by_id.get(selected.track_id)
-            if mask is not None:
-                self._selected_mask_pub.publish(mask_to_image_message(mask, header))
+            if selected_mask is not None:
+                self._selected_mask_pub.publish(
+                    mask_to_image_message(
+                        selected_mask, copy.deepcopy(selected.header)
+                    )
+                )
 
     def _list_objects(self, _request, response):
         with self._lock:
-            response.objects = list(self._objects)
+            stamp_ns = self._objects_stamp_ns
+            objects = list(self._objects)
+        response.objects = [] if self._freshness_error(stamp_ns) else objects
         response.display_text = '\n'.join(object_menu_lines(response.objects))
         return response
 
@@ -286,34 +392,156 @@ class YoloTracker(Node):
             response.message = 'preferred_arm must be auto, left or right'
             return response
         label = request.label.strip().lower()
+        now_ns = self.get_clock().now().nanoseconds
         with self._lock:
+            age_error = freshness_error(
+                now_ns,
+                self._objects_stamp_ns,
+                float(
+                    self.get_parameter(
+                        'maximum_selection_age_seconds'
+                    ).value
+                ),
+                maximum_future_seconds=float(
+                    self.get_parameter(
+                        'maximum_future_skew_seconds'
+                    ).value
+                ),
+            )
+            if age_error:
+                response.message = (
+                    'tracked object frame is stale; wait for a fresh RGB-D '
+                    f'frame ({age_error})'
+                )
+                return response
             candidates = list(self._objects)
-        selected = next(
-            (item for item in candidates if request.track_id >= 0 and item.track_id == request.track_id),
-            None,
-        )
-        if selected is None and label:
-            matching = [item for item in candidates if label in item.label.lower()]
-            if matching:
-                selected = max(matching, key=lambda item: item.confidence)
-        if selected is None:
-            response.message = 'requested object is not in the current frame'
-            return response
-        with self._lock:
-            self._selected_id = selected.track_id
+            selected = next(
+                (
+                    item
+                    for item in candidates
+                    if request.track_id >= 0
+                    and item.track_id == request.track_id
+                ),
+                None,
+            )
+            if selected is None and label:
+                matching = [
+                    item for item in candidates if label in item.label.lower()
+                ]
+                if matching:
+                    selected = max(
+                        matching, key=lambda item: item.confidence
+                    )
+            if selected is None:
+                response.message = 'requested object is not in the current frame'
+                return response
             selected_mask = self._object_masks.get(selected.track_id)
-        response.accepted = True
+            if selected_mask is None:
+                response.message = (
+                    'requested object has no instance segmentation mask'
+                )
+                return response
+            self._selected_id = selected.track_id
+            selected = copy.deepcopy(selected)
+            selected_mask = selected_mask.copy()
+            observation = (
+                self._observation_color,
+                self._observation_depth,
+                self._observation_intrinsics,
+            )
+            if any(value is None for value in observation):
+                response.message = 'selected object has no atomic RGB-D observation'
+                return response
         response.message = f'selected [{selected.track_id}] {selected.label} ({preferred_arm})'
         response.selected = selected
+        if request.include_observation:
+            try:
+                response.observation = self._make_selected_observation(
+                    selected.track_id,
+                    selected_mask,
+                    selected.header,
+                    *observation,
+                )
+            except Exception as exc:
+                response.message = (
+                    'failed to persist the selected RGB-D observation: '
+                    + str(exc)
+                )
+                self.get_logger().error(response.message)
+                return response
+        response.accepted = True
         self._selected_pub.publish(selected)
-        if selected_mask is not None:
-            self._selected_mask_pub.publish(mask_to_image_message(selected_mask, selected.header))
+        self._selected_mask_pub.publish(
+            mask_to_image_message(selected_mask, copy.deepcopy(selected.header))
+        )
         return response
+
+    def _make_selected_observation(
+        self,
+        track_id,
+        mask,
+        header,
+        color,
+        depth,
+        intrinsics,
+    ):
+        record = SelectedObjectObservation()
+        record.header = copy.deepcopy(header)
+        record.track_id = int(track_id)
+        token, payload_size, digest = write_observation(
+            self._observation_store,
+            color=color,
+            depth=depth,
+            mask=mask,
+            intrinsics=(
+                intrinsics.fx,
+                intrinsics.fy,
+                intrinsics.cx,
+                intrinsics.cy,
+            ),
+            track_id=track_id,
+            stamp_ns=stamp_nanoseconds(header.stamp),
+            frame_id=header.frame_id,
+            maximum_files=int(
+                self.get_parameter('maximum_observation_files').value
+            ),
+        )
+        record.storage_token = token
+        record.payload_size = int(payload_size)
+        record.sha256 = digest
+        return record
+
+    @staticmethod
+    def _header(stamp_ns, frame_id):
+        header = Header()
+        header.stamp.sec = int(stamp_ns) // 1_000_000_000
+        header.stamp.nanosec = int(stamp_ns) % 1_000_000_000
+        header.frame_id = str(frame_id)
+        return header
 
     def _publish_menu(self):
         with self._lock:
+            stamp_ns = self._objects_stamp_ns
             objects = list(self._objects)
+        if self._freshness_error(stamp_ns):
+            objects = []
         self._menu_pub.publish(String(data='\n'.join(object_menu_lines(objects))))
+
+    def _freshness_error(self, stamp_ns, *, now_ns=None):
+        if now_ns is None:
+            now_ns = self.get_clock().now().nanoseconds
+        return freshness_error(
+            now_ns,
+            stamp_ns,
+            float(
+                self.get_parameter(
+                    'maximum_observation_age_seconds'
+                ).value
+            ),
+            maximum_future_seconds=float(
+                self.get_parameter('maximum_future_skew_seconds').value
+            ),
+        )
 
     def destroy_node(self):
         self._stop.set()

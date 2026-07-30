@@ -1,5 +1,7 @@
 adaptive_object_grasping/GraspCandidate candidate
 bool execute
+# Forwarded from PickObject and validated again at the hardware boundary.
+string execution_confirmation
 ---
 bool success
 string message

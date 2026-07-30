@@ -5,19 +5,33 @@ rgbd_shm_bridge:
     depth_topic: /head_camera/aligned_depth_to_color/image_raw
     camera_info_topic: /head_camera/color/camera_info
     optical_frame: rgbd_head_color_optical_frame
-    publish_rate: 30.0
-    maximum_frame_id_delta: 2
+    # Poll faster than the 30 Hz cameras so the exact-ID pair is observed
+    # before either stream advances independently.
+    publish_rate: 60.0
+    # Read-only 306 probe: natural aligned pairs have equal frame IDs.
+    # A -1 sample was reproduced as a poll-order artifact after dropping delta 0.
+    expected_frame_id_delta: 0
+    frame_id_delta_deviation: 0
+    # Live matching samples drifted through roughly 5-49 ms across the two
+    # RealSense sensors; sequence and frame IDs must still match exactly.
+    maximum_pts_delta_seconds: 0.06
+    maximum_pts_clock_error_seconds: 5.0
 
 adaptive_grasp_hardware_probe:
   ros__parameters:
     camera_info_topic: /head_camera/color/camera_info
     joint_state_topic: /topic_arm_whole_body_and_gripper_current_joints_status_0_306
     eef_pose_topic: /topic_arm_current_robot_eef_pose_0_306
+    robot_state_topic: /robot_state_topic_0_306
     base_frame: Link_Zero_Point
     camera_frame: rgbd_head_color_optical_frame
     left_tcp_frame: left_grasp_tcp
     right_tcp_frame: right_grasp_tcp
     maximum_data_age: 1.0
+    status_publish_period: 0.5
+    # All five AutoLife protection heartbeat groups observed on robot 306.
+    # A reduced expected mask is a degraded state, not a valid subset.
+    required_heartbeat_mask: 31
 
 adaptive_grasp_robot_tf:
   ros__parameters:

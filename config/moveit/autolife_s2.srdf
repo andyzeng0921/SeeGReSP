@@ -18,6 +18,12 @@
     <joint name="Joint_Right_Wrist_Upper"/>
     <joint name="Joint_Right_Wrist_Lower"/>
   </group>
+  <!-- Conservative 14-DoF planning/collision group. This does not imply that
+       the vendor driver supports atomic synchronized dual-arm execution. -->
+  <group name="Both_Arms">
+    <group name="Left_Arm"/>
+    <group name="Right_Arm"/>
+  </group>
   <group_state name="current" group="Left_Arm">
     <joint name="Joint_Left_Shoulder_Inner" value="0"/>
     <joint name="Joint_Left_Shoulder_Outer" value="0"/>

@@ -10,6 +10,11 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 
+from adaptive_object_grasping_nodes.perception_sync_core import (
+    metadata_pair_decision,
+    source_stamp_nanoseconds,
+)
+
 
 class RgbdShmBridge(Node):
     """Publish the Autolife RealSense shared-memory stream as standard ROS topics."""
@@ -26,7 +31,12 @@ class RgbdShmBridge(Node):
         self.declare_parameter('optical_frame', 'rgbd_head_color_optical_frame')
         self.declare_parameter('publish_rate', 60.0)
         self.declare_parameter('retry_period', 2.0)
-        self.declare_parameter('maximum_frame_id_delta', 2)
+        # A longer read-only 306 probe showed that natural aligned pairs carry
+        # equal frame IDs. The earlier one-frame offset was a polling artifact.
+        self.declare_parameter('expected_frame_id_delta', 0)
+        self.declare_parameter('frame_id_delta_deviation', 0)
+        self.declare_parameter('maximum_pts_delta_seconds', 0.06)
+        self.declare_parameter('maximum_pts_clock_error_seconds', 5.0)
 
         self._color_consumer = None
         self._depth_consumer = None
@@ -35,6 +45,7 @@ class RgbdShmBridge(Node):
         self._pending_depth = None
         self._lock = threading.Lock()
         self._last_error = ''
+        self._last_rejected_delta = None
         self._published_frames = 0
 
         self._color_pub = self.create_publisher(
@@ -126,30 +137,75 @@ class RgbdShmBridge(Node):
         if color_consumer is None or depth_consumer is None:
             return
         try:
-            color = color_consumer.get_latest(nonblock=True)
-            depth = depth_consumer.get_latest(nonblock=True)
+            color = color_consumer.get_latest(nonblock=True, with_meta=True)
+            depth = depth_consumer.get_latest(nonblock=True, with_meta=True)
             if color is not None:
                 self._pending_color = color
             if depth is not None:
                 self._pending_depth = depth
             if self._pending_color is None or self._pending_depth is None:
                 return
-            color_frame, color_id = self._pending_color
-            depth_frame, depth_id = self._pending_depth
-            maximum_delta = max(0, int(self.get_parameter('maximum_frame_id_delta').value))
-            if abs(color_id - depth_id) > maximum_delta:
-                if color_id < depth_id:
+            color_frame, color_id, color_meta = self._pending_color
+            depth_frame, depth_id, depth_meta = self._pending_depth
+            expected_delta = int(
+                self.get_parameter('expected_frame_id_delta').value
+            )
+            allowed_deviation = int(
+                self.get_parameter('frame_id_delta_deviation').value
+            )
+            decision = metadata_pair_decision(
+                color_id,
+                depth_id,
+                color_meta,
+                depth_meta,
+                expected_frame_delta=expected_delta,
+                allowed_frame_deviation=allowed_deviation,
+                maximum_pts_delta_seconds=float(
+                    self.get_parameter('maximum_pts_delta_seconds').value
+                ),
+            )
+            if decision != 'match':
+                actual_delta = int(color_id) - int(depth_id)
+                color_sequence = int(color_meta.get('publish_seq') or 0)
+                depth_sequence = int(depth_meta.get('publish_seq') or 0)
+                pts_delta_ms = abs(
+                    int(color_meta.get('pts_ns') or 0)
+                    - int(depth_meta.get('pts_ns') or 0)
+                ) / 1e6
+                if actual_delta != self._last_rejected_delta:
+                    self.get_logger().warning(
+                        'rejected RGB-D pair: '
+                        f'color_id={color_id}, depth_id={depth_id}, '
+                        f'delta={actual_delta}, expected={expected_delta}'
+                        f'+/-{allowed_deviation}, '
+                        f'publish_seq={color_sequence}/{depth_sequence}, '
+                        f'PTS_delta={pts_delta_ms:.3f}ms, decision={decision}'
+                    )
+                    self._last_rejected_delta = actual_delta
+                if decision == 'drop_color':
                     self._pending_color = None
+                elif decision == 'drop_depth':
+                    self._pending_depth = None
                 else:
+                    self._pending_color = None
                     self._pending_depth = None
                 return
-            self._publish_pair(color_frame, depth_frame)
+            self._last_rejected_delta = None
+            self._publish_pair(
+                color_frame,
+                depth_frame,
+                color_meta,
+                depth_meta,
+            )
             self._published_frames += 1
             if self._published_frames == 1:
                 self.get_logger().info(
                     f'published first aligned RGB-D pair '
                     f'({color_frame.shape[1]}x{color_frame.shape[0]}, '
-                    f'frame delta={color_id - depth_id})'
+                    f'frame delta={color_id - depth_id}, '
+                    f'publish_seq={color_meta.get("publish_seq")}, '
+                    f'PTS delta='
+                    f'{abs(int(color_meta.get("pts_ns") or 0) - int(depth_meta.get("pts_ns") or 0)) / 1e6:.3f}ms)'
                 )
             self._pending_color = None
             self._pending_depth = None
@@ -157,12 +213,25 @@ class RgbdShmBridge(Node):
             self.get_logger().error(f'RGB-D SHM read failed: {exc}')
             self._close_consumers()
 
-    def _publish_pair(self, color, depth):
+    def _publish_pair(self, color, depth, color_meta, depth_meta):
         if color.ndim != 3 or color.shape[2] != 3:
             raise ValueError(f'unexpected color shape {color.shape}')
         if depth.shape != color.shape[:2] or depth.dtype != np.uint16:
             raise ValueError(f'unexpected aligned depth {depth.shape}/{depth.dtype}')
-        stamp = self.get_clock().now().to_msg()
+        now = self.get_clock().now()
+        stamp_ns = source_stamp_nanoseconds(
+            color_meta,
+            depth_meta,
+            now.nanoseconds,
+            maximum_pts_clock_error_seconds=float(
+                self.get_parameter(
+                    'maximum_pts_clock_error_seconds'
+                ).value
+            ),
+        )
+        stamp = now.to_msg()
+        stamp.sec = int(stamp_ns) // 1_000_000_000
+        stamp.nanosec = int(stamp_ns) % 1_000_000_000
         frame = str(self.get_parameter('optical_frame').value)
 
         color_msg = self._image_message(color, 'bgr8', stamp, frame)

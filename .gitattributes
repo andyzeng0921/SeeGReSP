@@ -1,0 +1,22 @@
+* text=auto eol=lf
+
+# Keep Linux / ROS entry points executable and free of Windows CRLF endings.
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.xml text eol=lf
+*.urdf text eol=lf
+*.srdf text eol=lf
+*.action text eol=lf
+*.msg text eol=lf
+*.srv text eol=lf
+*.md text eol=lf
+
+# Robot geometry and model artifacts are binary.
+*.stl binary -eol
+*.STL binary -eol
+*.pt binary -eol
+*.pth binary -eol
+*.onnx binary -eol
+*.engine binary -eol

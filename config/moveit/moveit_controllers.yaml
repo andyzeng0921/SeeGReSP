@@ -1,3 +1,28 @@
-moveit_simple_controller_manager:
-  controller_names: []
 moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+moveit_manage_controllers: false
+moveit_simple_controller_manager:
+  # AutoLife 2.2.3 exposes no FollowJointTrajectory action. Execution is
+  # intentionally handled by MotionExecutor's MoveIt-to-vendor JSON adapter.
+  # A typed planning-only entry is required because MoveItPy cannot declare an
+  # untyped empty string-array parameter.
+  controller_names:
+    - planning_only_vendor_adapter
+  planning_only_vendor_adapter:
+    type: FollowJointTrajectory
+    action_ns: disabled_use_motion_executor_vendor_adapter
+    default: false
+    joints:
+      - Joint_Left_Shoulder_Inner
+      - Joint_Left_Shoulder_Outer
+      - Joint_Left_UpperArm
+      - Joint_Left_Elbow
+      - Joint_Left_Forearm
+      - Joint_Left_Wrist_Upper
+      - Joint_Left_Wrist_Lower
+      - Joint_Right_Shoulder_Inner
+      - Joint_Right_Shoulder_Outer
+      - Joint_Right_UpperArm
+      - Joint_Right_Elbow
+      - Joint_Right_Forearm
+      - Joint_Right_Wrist_Upper
+      - Joint_Right_Wrist_Lower

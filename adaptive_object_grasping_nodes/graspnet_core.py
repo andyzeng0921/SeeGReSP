@@ -54,6 +54,34 @@ def sample_point_cloud(points, colors, number, random_generator=None):
     return points[indices], colors[indices]
 
 
+def collision_scene_cloud(
+    scene_points,
+    target_points,
+    *,
+    margin=0.20,
+    voxel_size=0.01,
+):
+    """Keep collision-relevant local voxels without random point loss."""
+    scene = np.asarray(scene_points, dtype=np.float32).reshape(-1, 3)
+    target = np.asarray(target_points, dtype=np.float32).reshape(-1, 3)
+    margin = float(margin)
+    voxel_size = float(voxel_size)
+    if margin <= 0.0 or voxel_size <= 0.0:
+        raise ValueError('collision margin and voxel size must be positive')
+    scene = scene[np.isfinite(scene).all(axis=1)]
+    target = target[np.isfinite(target).all(axis=1)]
+    if len(scene) == 0 or len(target) == 0:
+        raise ValueError('collision scene and target clouds must be non-empty')
+    lower = np.min(target, axis=0) - margin
+    upper = np.max(target, axis=0) + margin
+    local = scene[np.all((scene >= lower) & (scene <= upper), axis=1)]
+    if len(local) == 0:
+        raise ValueError('no collision scene points remain around the target')
+    voxels = np.floor(local / voxel_size).astype(np.int64)
+    _, indices = np.unique(voxels, axis=0, return_index=True)
+    return local[np.sort(indices)]
+
+
 def orthonormalize_rotation(matrix):
     matrix = np.asarray(matrix, dtype=np.float64).reshape(3, 3)
     u, _, vt = np.linalg.svd(matrix)
