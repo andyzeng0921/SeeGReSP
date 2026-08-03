@@ -1,5 +1,6 @@
 adaptive_object_grasping/TrackedObject target
 string preferred_arm
+adaptive_object_grasping/SelectedObjectObservation observation
 ---
 bool success
 string message

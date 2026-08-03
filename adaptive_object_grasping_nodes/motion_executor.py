@@ -1,7 +1,7 @@
 import copy
-import glob
 import json
-import struct
+import math
+import numpy as np
 import threading
 import time
 from pathlib import Path
@@ -10,47 +10,89 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
-from autolife_robot_srvs.srv import SetString
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from adaptive_object_grasping.srv import ExecuteCandidate
+from adaptive_object_grasping_nodes.dual_arm_core import (
+    default_joint_groups,
+    validate_joint_groups,
+    vendor_trajectory_joint_names,
+)
 from adaptive_object_grasping_nodes.motion_core import (
     compose_vendor_rrt_target,
-    effective_gripper_width,
+    motion_completion_timeout,
+    parse_gripper_feedback,
     parse_eef_feedback,
     pose_error,
+    resample_trajectory_for_uniform_timing,
+    validate_gripper_width,
+    validate_measurement_age,
     validate_pose,
     validate_vendor_trajectory,
+    validated_gripper_command,
+    vendor_gripper_to_urdf,
     vendor_pose_payload,
     width_to_gripper_position,
 )
 from adaptive_object_grasping_nodes.robot_geometry_core import tcp_target_to_eef
+from adaptive_object_grasping_nodes.environment_scene_core import validate_environment_scene
+from adaptive_object_grasping_nodes.visible_reset_core import (
+    ARM_JOINTS,
+    validate_visible_reset_pose,
+)
 from adaptive_object_grasping_nodes.robot_geometry_core import parse_robot_joint_feedback
+from adaptive_object_grasping_nodes.safety_core import (
+    HARDWARE_EXECUTION_CONFIRMATION,
+    execution_confirmation_valid,
+    site_acceptance_blockers,
+)
 
 
 class MotionExecutor(Node):
     def __init__(self):
         super().__init__('adaptive_grasp_motion_executor')
-        self.declare_parameter('planning_backend', 'vendor_rrt')
+        default_groups = default_joint_groups()
+        self.declare_parameter(
+            'planning_backend', 'moveit_py_vendor_execution'
+        )
         self.declare_parameter('dry_run', True)
         self.declare_parameter('allow_hardware_execution', False)
         self.declare_parameter('require_hardware_ready', True)
+        self.declare_parameter('hardware_status_maximum_age', 2.0)
+        self.declare_parameter('require_site_acceptance', True)
+        self.declare_parameter('site_acceptance_path', 'config/site_acceptance.yaml')
+        self.declare_parameter('require_environment_scene', True)
+        self.declare_parameter('environment_scene_path', 'config/environment_scene.yaml')
+        self.declare_parameter('visible_reset_pose_path', 'config/visible_reset_pose.yaml')
+        self.declare_parameter(
+            'hardware_execution_confirmation', HARDWARE_EXECUTION_CONFIRMATION
+        )
         self.declare_parameter('base_frame', 'Link_Zero_Point')
         self.declare_parameter('topic_suffix', '0_306')
         self.declare_parameter('workspace_minimum', [0.10, -0.75, 0.20])
         self.declare_parameter('workspace_maximum', [0.85, 0.75, 1.45])
         self.declare_parameter('motion_timeout', 12.0)
+        self.declare_parameter('motion_completion_margin', 3.0)
+        self.declare_parameter('motion_settle_time', 0.30)
+        self.declare_parameter('maximum_candidate_age', 1.0)
+        self.declare_parameter('dry_run_maximum_candidate_age', 5.0)
+        self.declare_parameter('candidate_future_tolerance', 0.05)
         self.declare_parameter('position_tolerance', 0.025)
         self.declare_parameter('orientation_tolerance', 0.15)
         self.declare_parameter('maximum_gripper_width', 0.10)
         self.declare_parameter('grasp_width_scale', 0.5)
         self.declare_parameter('gripper_open_position', 10.0)
         self.declare_parameter('gripper_closed_position', 330.0)
+        self.declare_parameter('gripper_feedback_open_position', 0.0)
+        self.declare_parameter('gripper_feedback_closed_position', 360.0)
+        self.declare_parameter('urdf_gripper_open_position', -1.333)
+        self.declare_parameter('urdf_gripper_closed_position', 1.0)
         self.declare_parameter('gripper_wait', 1.0)
         self.declare_parameter('lift_distance', 0.10)
         self.declare_parameter('left_tcp_translation', [0.20187, -0.00014, -0.03035])
@@ -59,6 +101,7 @@ class MotionExecutor(Node):
         self.declare_parameter('right_tcp_quaternion', [-0.70710678, 0.0, 0.0, 0.70710678])
         self.declare_parameter('moveit_left_group', 'Left_Arm')
         self.declare_parameter('moveit_right_group', 'Right_Arm')
+        self.declare_parameter('moveit_dual_arm_group', 'Both_Arms')
         self.declare_parameter('moveit_left_tip', 'Link_Left_Wrist_Lower_to_Gripper')
         self.declare_parameter('moveit_right_tip', 'Link_Right_Wrist_Lower_to_Gripper')
         self.declare_parameter('moveit_planning_time', 5.0)
@@ -66,39 +109,152 @@ class MotionExecutor(Node):
         self.declare_parameter('moveit_max_velocity_scaling', 0.25)
         self.declare_parameter('moveit_max_acceleration_scaling', 0.25)
         self.declare_parameter('enable_pbvs_hardware_follow', False)
-        self.declare_parameter('pbvs_follow_backend', 'moveit_servo')
-        self.declare_parameter('moveit_servo_pose_topic', '/servo_node/pose_target_cmds')
-        self.declare_parameter('pbvs_command_rate', 10.0)
         self.declare_parameter('vendor_service_timeout', 15.0)
         self.declare_parameter('vendor_rrt_max_step_size', 0.06)
         self.declare_parameter('vendor_trajectory_duration', 4.0)
         self.declare_parameter('vendor_excluded_joints', ['Joint_Ankle', 'Joint_Knee'])
         self.declare_parameter('enable_joints_before_execute', True)
-        self.declare_parameter('enable_pid_loop_before_execute', True)
+        self.declare_parameter('enable_pid_loop_before_execute', False)
         self.declare_parameter('inactive_arm_position_tolerance', 0.06)
         self.declare_parameter('inactive_arm_orientation_tolerance', 0.30)
+        self.declare_parameter(
+            'leg_waist_joint_names', default_groups['leg_waist']
+        )
+        self.declare_parameter('left_arm_joint_names', default_groups['left_arm'])
+        self.declare_parameter('right_arm_joint_names', default_groups['right_arm'])
+        self.declare_parameter('neck_joint_names', default_groups['neck'])
 
         suffix = str(self.get_parameter('topic_suffix').value)
         self._condition = threading.Condition()
+        self._execution_lock = threading.Lock()
+        self._command_state_lock = threading.Lock()
+        self._active_hardware_execution = False
+        self._unknown_motion_fault = None
+        self._hardware_command_sequence = 0
         self._current_poses = {}
+        self._eef_feedback_sequence = 0
+        self._last_eef_feedback_time = 0.0
         self._current_joints = None
+        self._current_grippers = None
         self._hardware_ready = False
         self._hardware_status_time = 0.0
-        self._selected_arm = 'left'
-        self._last_pbvs_command = 0.0
+        self._pbvs_unsupported_reported = False
         self._moveit = None
+        self._environment_scene_loaded = False
         self._moveit_components = {}
         self._last_joint_feedback_time = 0.0
         self._joint_target_error_deg = None
         self._target_joint_state = None
-        self._joint_names = {
-            'leg_waist': ['Joint_Ankle', 'Joint_Knee', 'Joint_Waist_Pitch', 'Joint_Waist_Yaw'],
-            'left_arm': ['Joint_Left_Shoulder_Inner', 'Joint_Left_Shoulder_Outer', 'Joint_Left_UpperArm',
-                         'Joint_Left_Elbow', 'Joint_Left_Forearm', 'Joint_Left_Wrist_Upper', 'Joint_Left_Wrist_Lower'],
-            'right_arm': ['Joint_Right_Shoulder_Inner', 'Joint_Right_Shoulder_Outer', 'Joint_Right_UpperArm',
-                          'Joint_Right_Elbow', 'Joint_Right_Forearm', 'Joint_Right_Wrist_Upper', 'Joint_Right_Wrist_Lower'],
-            'neck': ['Joint_Neck_Roll', 'Joint_Neck_Pitch', 'Joint_Neck_Yaw'],
-        }
+
+        # Cache frequently-accessed parameters to avoid repeated get_parameter calls.
+        self._planning_backend = str(self.get_parameter('planning_backend').value)
+        self._topic_suffix = suffix
+        self._dry_run = bool(self.get_parameter('dry_run').value)
+        self._allow_hardware_execution = bool(self.get_parameter('allow_hardware_execution').value)
+        self._require_hardware_ready = bool(self.get_parameter('require_hardware_ready').value)
+        self._hardware_status_maximum_age = float(
+            self.get_parameter('hardware_status_maximum_age').value
+        )
+        self._require_site_acceptance = bool(
+            self.get_parameter('require_site_acceptance').value
+        )
+        self._site_acceptance_path = str(
+            self.get_parameter('site_acceptance_path').value
+        )
+        self._require_environment_scene = bool(
+            self.get_parameter('require_environment_scene').value
+        )
+        self._environment_scene_path = str(
+            self.get_parameter('environment_scene_path').value
+        )
+        self._visible_reset_pose_path = str(
+            self.get_parameter('visible_reset_pose_path').value
+        )
+        self._hardware_execution_confirmation = str(
+            self.get_parameter('hardware_execution_confirmation').value
+        )
+        self._base_frame = str(self.get_parameter('base_frame').value)
+        self._workspace_min = list(self.get_parameter('workspace_minimum').value)
+        self._workspace_max = list(self.get_parameter('workspace_maximum').value)
+        self._motion_timeout = float(self.get_parameter('motion_timeout').value)
+        self._motion_completion_margin = float(
+            self.get_parameter('motion_completion_margin').value
+        )
+        self._motion_settle_time = float(
+            self.get_parameter('motion_settle_time').value
+        )
+        if (
+            not math.isfinite(self._motion_settle_time)
+            or self._motion_settle_time < 0.0
+        ):
+            raise ValueError('motion_settle_time must be finite and non-negative')
+        self._maximum_candidate_age = float(
+            self.get_parameter('maximum_candidate_age').value
+        )
+        self._dry_run_maximum_candidate_age = float(
+            self.get_parameter('dry_run_maximum_candidate_age').value
+        )
+        if (
+            not math.isfinite(self._maximum_candidate_age)
+            or self._maximum_candidate_age <= 0.0
+            or not math.isfinite(self._dry_run_maximum_candidate_age)
+            or self._dry_run_maximum_candidate_age < self._maximum_candidate_age
+        ):
+            raise ValueError(
+                'candidate ages must be finite and positive, and the dry-run '
+                'age must not be stricter than the execution age'
+            )
+        self._candidate_future_tolerance = float(
+            self.get_parameter('candidate_future_tolerance').value
+        )
+        self._position_tolerance = float(self.get_parameter('position_tolerance').value)
+        self._orientation_tolerance = float(self.get_parameter('orientation_tolerance').value)
+        self._max_gripper_width = float(self.get_parameter('maximum_gripper_width').value)
+        self._grasp_width_scale = float(self.get_parameter('grasp_width_scale').value)
+        self._gripper_open_pos = float(self.get_parameter('gripper_open_position').value)
+        self._gripper_closed_pos = float(self.get_parameter('gripper_closed_position').value)
+        self._gripper_feedback_open_pos = float(
+            self.get_parameter('gripper_feedback_open_position').value
+        )
+        self._gripper_feedback_closed_pos = float(
+            self.get_parameter('gripper_feedback_closed_position').value
+        )
+        self._urdf_gripper_open_pos = float(
+            self.get_parameter('urdf_gripper_open_position').value
+        )
+        self._urdf_gripper_closed_pos = float(
+            self.get_parameter('urdf_gripper_closed_position').value
+        )
+        self._gripper_wait = float(self.get_parameter('gripper_wait').value)
+        self._lift_distance = float(self.get_parameter('lift_distance').value)
+        self._left_tcp_translation = list(self.get_parameter('left_tcp_translation').value)
+        self._right_tcp_translation = list(self.get_parameter('right_tcp_translation').value)
+        self._left_tcp_quaternion = list(self.get_parameter('left_tcp_quaternion').value)
+        self._right_tcp_quaternion = list(self.get_parameter('right_tcp_quaternion').value)
+        self._moveit_left_group = str(self.get_parameter('moveit_left_group').value)
+        self._moveit_right_group = str(self.get_parameter('moveit_right_group').value)
+        self._moveit_left_tip = str(self.get_parameter('moveit_left_tip').value)
+        self._moveit_right_tip = str(self.get_parameter('moveit_right_tip').value)
+        self._moveit_planning_time = float(self.get_parameter('moveit_planning_time').value)
+        self._moveit_planning_attempts = int(self.get_parameter('moveit_planning_attempts').value)
+        self._moveit_max_velocity_scaling = float(self.get_parameter('moveit_max_velocity_scaling').value)
+        self._moveit_max_acceleration_scaling = float(self.get_parameter('moveit_max_acceleration_scaling').value)
+        self._enable_pbvs_follow = bool(self.get_parameter('enable_pbvs_hardware_follow').value)
+        self._vendor_service_timeout = float(self.get_parameter('vendor_service_timeout').value)
+        self._vendor_rrt_max_step = float(self.get_parameter('vendor_rrt_max_step_size').value)
+        self._vendor_trajectory_duration = float(self.get_parameter('vendor_trajectory_duration').value)
+        self._vendor_excluded_joints = list(self.get_parameter('vendor_excluded_joints').value)
+        self._enable_joints_before_exec = bool(self.get_parameter('enable_joints_before_execute').value)
+        self._enable_pid_loop = bool(self.get_parameter('enable_pid_loop_before_execute').value)
+        self._inactive_pos_tol = float(self.get_parameter('inactive_arm_position_tolerance').value)
+        self._inactive_orient_tol = float(self.get_parameter('inactive_arm_orientation_tolerance').value)
+
+        self._joint_names = validate_joint_groups({
+            'leg_waist': list(self.get_parameter('leg_waist_joint_names').value),
+            'left_arm': list(self.get_parameter('left_arm_joint_names').value),
+            'right_arm': list(self.get_parameter('right_arm_joint_names').value),
+            'neck': list(self.get_parameter('neck_joint_names').value),
+        })
         callback_group = ReentrantCallbackGroup()
 
         self._vendor_pose_pub = self.create_publisher(
@@ -113,18 +269,22 @@ class MotionExecutor(Node):
         self._target_joints_pub = self.create_publisher(
             String, f'/topic_arm_whole_body_target_joints_position_{suffix}', 10
         )
-        self._ik_client = self.create_client(
-            SetString, f'/service_arm_robot_inverse_kinematics_{suffix}'
-        )
-        self._fk_client = self.create_client(
-            SetString, f'/service_arm_robot_forward_kinematics_{suffix}'
-        )
-        self._rrt_client = self.create_client(
-            SetString, f'/service_arm_whole_body_joint_motion_planning_{suffix}'
-        )
-        self._servo_pose_pub = self.create_publisher(
-            PoseStamped, str(self.get_parameter('moveit_servo_pose_topic').value), 10
-        )
+        self._ik_client = None
+        self._fk_client = None
+        self._rrt_client = None
+        if self._planning_backend == 'vendor_rrt':
+            # Keep the vendor conda-generated service ABI out of the MoveIt
+            # process unless this diagnostic-only backend is explicitly used.
+            from autolife_robot_srvs.srv import SetString
+            self._ik_client = self.create_client(
+                SetString, f'/service_arm_robot_inverse_kinematics_{suffix}'
+            )
+            self._fk_client = self.create_client(
+                SetString, f'/service_arm_robot_forward_kinematics_{suffix}'
+            )
+            self._rrt_client = self.create_client(
+                SetString, f'/service_arm_whole_body_joint_motion_planning_{suffix}'
+            )
         self._status_pub = self.create_publisher(String, 'motion_execution_status', 10)
         self._joint_state_pub = self.create_publisher(JointState, 'joint_states', 10)
         target_state_qos = QoSProfile(
@@ -156,7 +316,6 @@ class MotionExecutor(Node):
             callback_group=callback_group,
         )
         self.create_subscription(String, 'hardware_check_status', self._on_hardware, 10)
-        self.create_subscription(String, 'selected_arm', self._on_selected_arm, 10)
         self.create_subscription(PoseStamped, 'pbvs_target_pose', self._on_pbvs_pose, 10)
         self.create_service(
             ExecuteCandidate,
@@ -164,18 +323,29 @@ class MotionExecutor(Node):
             self._execute_service,
             callback_group=callback_group,
         )
+        self.create_service(
+            Trigger,
+            'plan_visible_reset',
+            self._plan_visible_reset_service,
+            callback_group=callback_group,
+        )
         self.create_timer(0.5, self._republish_target_joint_state)
         self.get_logger().warning(
-            f'Motion executor ready: backend={self.get_parameter("planning_backend").value}, '
-            f'dry_run={self.get_parameter("dry_run").value}, '
-            f'hardware_unlock={self.get_parameter("allow_hardware_execution").value}'
+            f'Motion executor ready: backend={self._planning_backend}, '
+            f'dry_run={self._dry_run}, '
+            f'hardware_unlock={self._allow_hardware_execution}'
         )
 
     def _on_eef(self, message):
         try:
             poses = parse_eef_feedback(message.data)
             with self._condition:
-                self._current_poses.update(poses)
+                # The parser requires one complete, finite dual-arm snapshot.
+                # Replace the snapshot atomically and advance a local sequence so
+                # a command can never be acknowledged by pre-command feedback.
+                self._current_poses = poses
+                self._eef_feedback_sequence += 1
+                self._last_eef_feedback_time = time.monotonic()
                 self._condition.notify_all()
         except Exception as exc:
             self.get_logger().warning(f'EEF feedback rejected: {exc}')
@@ -184,6 +354,7 @@ class MotionExecutor(Node):
         try:
             parsed = parse_robot_joint_feedback(message.data, self._joint_names)
             payload = json.loads(message.data)
+            grippers = parse_gripper_feedback(payload)
             target_errors = []
             for state_key, target_key in (
                 ('left_arm_joint_state', 'left_arm_target_joint_state'),
@@ -198,23 +369,24 @@ class MotionExecutor(Node):
                     group: [parsed[name] for name in joint_names]
                     for group, joint_names in self._joint_names.items()
                 }
+                self._current_grippers = grippers
                 self._last_joint_feedback_time = time.monotonic()
                 self._joint_target_error_deg = max(target_errors) if target_errors else None
                 self._condition.notify_all()
-            self._publish_joint_state(parsed)
+            self._publish_joint_state(parsed, grippers)
         except Exception as exc:
             self.get_logger().warning(f'joint feedback rejected: {exc}')
 
-    def _publish_joint_state(self, parsed_degrees):
+    def _publish_joint_state(self, parsed_degrees, grippers):
         joint_state = JointState()
         joint_state.header.stamp = self.get_clock().now().to_msg()
         for group in ('leg_waist', 'left_arm', 'right_arm', 'neck'):
             for name in self._joint_names[group]:
                 joint_state.name.append(name)
                 joint_state.position.append(float(parsed_degrees[name]) * 3.141592653589793 / 180.0)
-        # The vendor feedback omits the planar base and gripper joints that are
-        # present in the planning URDF. Keep them at a known state so MoveIt can
-        # construct a complete current robot state.
+        # The vendor feedback omits the planar base joints. Gripper feedback is
+        # mapped through an explicit vendor-to-URDF calibration instead of being
+        # falsely published as zero.
         joint_state.name.extend([
             'Joint_Ground_Vehicle_X',
             'Joint_Ground_Vehicle_Y',
@@ -222,14 +394,23 @@ class MotionExecutor(Node):
             'Joint_Left_Gripper',
             'Joint_Right_Gripper',
         ])
-        joint_state.position.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+        joint_state.position.extend([
+            0.0,
+            0.0,
+            0.0,
+            self._gripper_to_urdf(grippers['left']),
+            self._gripper_to_urdf(grippers['right']),
+        ])
         self._joint_state_pub.publish(joint_state)
 
     def _publish_target_joint_state(self, planned_radians):
         with self._condition:
             current_joints = copy.deepcopy(self._current_joints)
+            current_grippers = copy.deepcopy(self._current_grippers)
         if current_joints is None:
             raise RuntimeError('current joint feedback is required to publish target robot state')
+        if current_grippers is None:
+            raise RuntimeError('current gripper feedback is required to publish target robot state')
         joint_state = JointState()
         joint_state.header.stamp = self.get_clock().now().to_msg()
         for group in ('leg_waist', 'left_arm', 'right_arm', 'neck'):
@@ -248,10 +429,25 @@ class MotionExecutor(Node):
             'Joint_Left_Gripper',
             'Joint_Right_Gripper',
         ])
-        joint_state.position.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+        joint_state.position.extend([
+            0.0,
+            0.0,
+            0.0,
+            self._gripper_to_urdf(current_grippers['left']),
+            self._gripper_to_urdf(current_grippers['right']),
+        ])
         with self._condition:
             self._target_joint_state = copy.deepcopy(joint_state)
         self._target_joint_state_pub.publish(joint_state)
+
+    def _gripper_to_urdf(self, vendor_position):
+        return vendor_gripper_to_urdf(
+            vendor_position,
+            self._gripper_feedback_open_pos,
+            self._gripper_feedback_closed_pos,
+            self._urdf_gripper_open_pos,
+            self._urdf_gripper_closed_pos,
+        )
 
     def _republish_target_joint_state(self):
         with self._condition:
@@ -269,44 +465,49 @@ class MotionExecutor(Node):
         except Exception:
             self._hardware_ready = False
 
-    def _on_selected_arm(self, message):
-        if message.data in ('left', 'right'):
-            self._selected_arm = message.data
-
-    def _on_pbvs_pose(self, message):
-        if not bool(self.get_parameter('enable_pbvs_hardware_follow').value):
+    def _on_pbvs_pose(self, _message):
+        if not self._enable_pbvs_follow:
             return
-        if not self._execution_unlocked():
-            return
-        now = time.monotonic()
-        minimum_period = 1.0 / max(1.0, float(self.get_parameter('pbvs_command_rate').value))
-        if now - self._last_pbvs_command < minimum_period:
-            return
-        self._last_pbvs_command = now
-        backend = str(self.get_parameter('pbvs_follow_backend').value)
-        if backend == 'moveit_servo':
-            self._servo_pose_pub.publish(message)
-        elif backend == 'vendor_task_space':
-            self._publish_vendor_pose(self._selected_arm, message)
+        # No verified controller-ownership or stop contract exists for PBVS.
+        # Never make this subscription a second writer to hardware topics.
+        if not self._pbvs_unsupported_reported:
+            self._pbvs_unsupported_reported = True
+            self.get_logger().error(
+                'PBVS hardware follow is configured but unsupported; '
+                'all PBVS hardware commands are dropped'
+            )
 
     def _execute_service(self, request, response):
+        if not self._execution_lock.acquire(blocking=False):
+            response.message = 'motion executor is busy with another planning or execution request'
+            return response
+        try:
+            return self._execute_service_locked(request, response)
+        finally:
+            self._execution_lock.release()
+
+    def _execute_service_locked(self, request, response):
         candidate = request.candidate
-        error = self._validate_candidate(candidate)
+        error = self._validate_candidate(candidate, execute=bool(request.execute))
         if error:
             response.message = error
             return response
-        if not request.execute or bool(self.get_parameter('dry_run').value):
+        if not request.execute:
             try:
-                backend = str(self.get_parameter('planning_backend').value)
-                if backend == 'vendor_rrt':
+                if self._planning_backend == 'vendor_rrt':
                     self._validate_vendor_rrt_candidate(candidate)
                     response.message = (
-                        'vendor IK/FK/RRT validated pregrasp, grasp and lift; '
-                        'no hardware command sent'
+                        'vendor IK/FK/RRT independently validated pregrasp, grasp '
+                        'and lift from the current state; no continuous execution '
+                        'path was proven and no hardware command was sent'
                     )
-                elif backend in ('moveit_py', 'moveit_py_vendor_execution'):
+                elif self._planning_backend in ('moveit_py', 'moveit_py_vendor_execution'):
                     self._validate_moveit_candidate(candidate)
-                    response.message = 'MoveIt2 planned pregrasp, grasp and lift; no hardware command sent'
+                    response.message = (
+                        'MoveIt2 independently planned pregrasp, grasp and lift '
+                        'from the current state; no continuous execution path was '
+                        'proven and no hardware command was sent'
+                    )
                 else:
                     response.message = 'candidate validated in dry-run; no hardware command sent'
                 response.success = True
@@ -314,43 +515,108 @@ class MotionExecutor(Node):
                 response.message = f'dry-run planning failed: {exc}'
                 self._publish_status('failed', response.message)
             return response
-        if not self._execution_unlocked():
-            response.message = 'hardware execution remains locked by configuration or hardware probe'
+        if self._dry_run:
+            response.message = (
+                'hardware execution rejected: execute=true while dry_run is enabled'
+            )
             return response
+        confirmation = getattr(request, 'execution_confirmation', '')
+        if not execution_confirmation_valid(
+            confirmation, self._hardware_execution_confirmation
+        ):
+            response.message = (
+                'hardware execution requires the exact operator confirmation token'
+            )
+            return response
+        blockers = self._execution_blockers()
+        if blockers:
+            response.message = 'hardware execution remains locked: ' + '; '.join(blockers)
+            return response
+        with self._command_state_lock:
+            starting_command_sequence = self._hardware_command_sequence
+        self._active_hardware_execution = True
         try:
             self._enable_execution_joints(candidate.arm)
-            backend = str(self.get_parameter('planning_backend').value)
-            if backend == 'moveit_py':
-                self._execute_moveit(candidate, execute_with_moveit=True)
-            elif backend == 'moveit_py_vendor_execution':
+            backend = self._planning_backend
+            if backend == 'moveit_py_vendor_execution':
                 self._execute_moveit(candidate, execute_with_moveit=False)
-            elif backend == 'vendor_rrt':
-                self._execute_vendor_rrt(candidate)
-            elif backend == 'vendor_task_space':
-                self._execute_vendor(candidate)
             else:
-                raise ValueError(f'unsupported planning_backend: {backend}')
+                raise RuntimeError(
+                    f'hardware backend {backend!r} is unsupported; only '
+                    'moveit_py_vendor_execution may reach the vendor trajectory adapter'
+                )
             response.success = True
             response.message = f'grasp sequence completed using {backend}'
         except Exception as exc:
+            if self._hardware_commands_issued_after(starting_command_sequence):
+                self._latch_unknown_motion_fault(
+                    f'hardware command outcome became unknown after: {exc}'
+                )
+            fault = self._unknown_motion_fault_reason()
             response.message = f'grasp execution failed: {exc}'
+            if fault:
+                response.message += f'; executor fault latched: {fault}'
             self._publish_status('failed', response.message)
+        finally:
+            self._active_hardware_execution = False
         return response
 
+    def _record_hardware_command(self):
+        """Record intent immediately before a fire-and-forget vendor publish."""
+
+        with self._command_state_lock:
+            self._hardware_command_sequence += 1
+            return self._hardware_command_sequence
+
+    def _hardware_commands_issued_after(self, sequence):
+        with self._command_state_lock:
+            return self._hardware_command_sequence > int(sequence)
+
+    def _unknown_motion_fault_reason(self):
+        with self._command_state_lock:
+            return self._unknown_motion_fault
+
+    def _latch_unknown_motion_fault(self, reason):
+        detail = str(reason).strip() or 'hardware command outcome is unknown'
+        newly_latched = False
+        with self._command_state_lock:
+            if self._unknown_motion_fault is None:
+                self._unknown_motion_fault = detail
+                newly_latched = True
+            latched = self._unknown_motion_fault
+        if newly_latched:
+            self._publish_status(
+                'unknown_motion_fault_latched',
+                latched
+                + '; restart only after physical inspection and emergency-stop readiness',
+            )
+        return latched
+
+    def _wait_with_execution_health(self, duration):
+        duration = float(duration)
+        if not math.isfinite(duration) or duration < 0.0:
+            raise ValueError('execution wait duration must be finite and non-negative')
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            self._assert_execution_health()
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     def _enable_execution_joints(self, arm):
-        if not bool(self.get_parameter('enable_joints_before_execute').value):
+        self._assert_execution_health()
+        if not self._enable_joints_before_exec:
             return
         with self._condition:
             current_joints = copy.deepcopy(self._current_joints)
         if current_joints is not None:
             self._publish_status('syncing_current_joint_targets', arm)
+            self._assert_execution_health()
+            self._record_hardware_command()
             self._target_joints_pub.publish(String(data=json.dumps({
                 'leg_waist_target_joints_position': [float(value) for value in current_joints['leg_waist']],
                 'left_arm_target_joints_position': [float(value) for value in current_joints['left_arm']],
                 'right_arm_target_joints_position': [float(value) for value in current_joints['right_arm']],
             })))
-            time.sleep(0.3)
+            self._wait_with_execution_health(0.3)
 
         groups = [arm + '_arm']
         joint_names = [
@@ -363,113 +629,217 @@ class MotionExecutor(Node):
         enable = {name: True for name in joint_names}
         enable[gripper_name] = True
         self._publish_status('clearing_joint_errors', arm)
+        self._assert_execution_health()
+        self._record_hardware_command()
         self._joint_clear_error_pub.publish(String(data=json.dumps(clear_names)))
-        time.sleep(0.3)
+        self._wait_with_execution_health(0.3)
         self._publish_status('enabling_joints', arm)
+        self._assert_execution_health()
+        self._record_hardware_command()
         self._joint_enable_pub.publish(String(data=json.dumps(enable)))
-        time.sleep(0.8)
-        self._enable_vendor_pid_loop()
-
-
-    def _enable_vendor_pid_loop(self):
-        if not bool(self.get_parameter('enable_pid_loop_before_execute').value):
-            return
-        paths = sorted(glob.glob('/dev/shm/pid_loop_state_*'))
-        if not paths:
-            self.get_logger().warning('vendor PID loop shared memory was not found')
-            return
-        for path in paths:
-            try:
-                with open(path, 'r+b', buffering=0) as handle:
-                    handle.seek(0)
-                    handle.write(struct.pack('i', 1))
-                    handle.flush()
-            except OSError as exc:
-                self.get_logger().warning(f'failed to enable vendor PID loop via {path}: {exc}')
-        self._publish_status('pid_loop_enabled', ','.join(paths))
-
+        self._wait_with_execution_health(0.8)
     def _execution_unlocked(self):
-        if bool(self.get_parameter('dry_run').value):
-            return False
-        if not bool(self.get_parameter('allow_hardware_execution').value):
-            return False
-        if bool(self.get_parameter('require_hardware_ready').value):
-            return self._hardware_ready and time.monotonic() - self._hardware_status_time < 7.0
-        return True
+        return not self._execution_blockers()
 
-    def _validate_candidate(self, candidate):
+    def _execution_blockers(self):
+        blockers = []
+        fault = self._unknown_motion_fault_reason()
+        if fault:
+            blockers.append(
+                'unknown-motion fault is latched: '
+                + fault
+                + '; physical inspection and process restart are required'
+            )
+        if self._dry_run:
+            blockers.append('dry_run is enabled')
+        if not self._allow_hardware_execution:
+            blockers.append('allow_hardware_execution is false')
+        if self._enable_pbvs_follow:
+            blockers.append(
+                'PBVS hardware follow is unsupported because controller ownership '
+                'and stop semantics are not verified'
+            )
+        if self._planning_backend != 'moveit_py_vendor_execution':
+            blockers.append(
+                f'hardware backend {self._planning_backend!r} is unsupported; '
+                'vendor_rrt freezes joints used by its planner and '
+                'vendor_task_space has no verified collision guarantee'
+            )
+        if self._enable_pid_loop:
+            blockers.append(
+                'direct vendor PID shared-memory control is unsupported; '
+                'use the documented vendor startup procedure'
+            )
+        if self._require_hardware_ready:
+            if not self._hardware_probe_ready():
+                blockers.append('hardware probe is not ready or its status is stale')
+        if self._require_site_acceptance:
+            blockers.extend(self._site_acceptance_file_blockers())
+        return blockers
+
+    def _site_acceptance_file_blockers(self):
+        configured = Path(self._site_acceptance_path).expanduser()
+        if configured.is_absolute():
+            path = configured
+        else:
+            package_share = Path(
+                get_package_share_directory('adaptive_object_grasping')
+            ).resolve()
+            path = (package_share / configured).resolve()
+            try:
+                path.relative_to(package_share)
+            except ValueError:
+                return [
+                    'relative site acceptance path escapes the installed package share'
+                ]
+        try:
+            data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+        except Exception as exc:
+            return [f'cannot read site acceptance file {path}: {exc}']
+        return [
+            f'site acceptance: {blocker}'
+            for blocker in site_acceptance_blockers(data)
+        ]
+
+    def _hardware_probe_ready(self):
+        return (
+            self._hardware_ready
+            and time.monotonic() - self._hardware_status_time
+            <= self._hardware_status_maximum_age
+        )
+
+    def _assert_execution_health(self):
+        fault = self._unknown_motion_fault_reason()
+        if fault:
+            raise RuntimeError(
+                'unknown-motion fault is latched; no further hardware command is allowed: '
+                + fault
+            )
+        if (
+            self._active_hardware_execution
+            and self._require_hardware_ready
+            and not self._hardware_probe_ready()
+        ):
+            self._publish_status(
+                'safety_watchdog_blocked',
+                'hardware probe became unsafe or stale; no further command will be sent',
+            )
+            raise RuntimeError(
+                'hardware safety watchdog became unsafe or stale; '
+                'use the physical emergency stop if the robot is still moving'
+            )
+
+    def _validate_candidate(self, candidate, execute=False):
         if candidate.arm not in ('left', 'right'):
             return 'candidate arm must be left or right'
-        base_frame = str(self.get_parameter('base_frame').value)
-        if candidate.grasp_pose.header.frame_id != base_frame:
-            return f'candidate frame must be {base_frame}'
-        lower = self.get_parameter('workspace_minimum').value
-        upper = self.get_parameter('workspace_maximum').value
+        if (
+            candidate.header.frame_id != self._base_frame
+            or candidate.grasp_pose.header.frame_id != self._base_frame
+            or candidate.pregrasp_pose.header.frame_id != self._base_frame
+        ):
+            return f'candidate frame must be {self._base_frame}'
+        candidate_stamp = (
+            int(candidate.header.stamp.sec),
+            int(candidate.header.stamp.nanosec),
+        )
         for label, stamped in (
             ('pregrasp', candidate.pregrasp_pose),
             ('grasp', candidate.grasp_pose),
+        ):
+            pose_stamp = (
+                int(stamped.header.stamp.sec),
+                int(stamped.header.stamp.nanosec),
+            )
+            if pose_stamp != candidate_stamp:
+                return (
+                    f'{label} timestamp must exactly match the candidate '
+                    'measurement timestamp'
+                )
+        stamp_seconds = (
+            float(candidate.header.stamp.sec)
+            + float(candidate.header.stamp.nanosec) / 1_000_000_000.0
+        )
+        now_seconds = self.get_clock().now().nanoseconds / 1_000_000_000.0
+        age_error = validate_measurement_age(
+            now_seconds,
+            stamp_seconds,
+            (
+                self._maximum_candidate_age
+                if execute
+                else self._dry_run_maximum_candidate_age
+            ),
+            self._candidate_future_tolerance,
+        )
+        if age_error:
+            return age_error
+        if not math.isfinite(float(candidate.score)):
+            return 'candidate score must be finite'
+        lift = copy.deepcopy(candidate.grasp_pose)
+        lift.pose.position.z += self._lift_distance
+        for label, stamped in (
+            ('pregrasp', candidate.pregrasp_pose),
+            ('grasp', candidate.grasp_pose),
+            ('lift', lift),
         ):
             pose = stamped.pose
             error = validate_pose(
                 [pose.position.x, pose.position.y, pose.position.z],
                 [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w],
-                lower,
-                upper,
+                self._workspace_min,
+                self._workspace_max,
             )
             if error:
                 return f'{label} pose rejected: {error}'
-        raw_width = float(candidate.required_width)
-        width_scale = float(self.get_parameter('grasp_width_scale').value)
-        maximum_width = float(self.get_parameter('maximum_gripper_width').value)
-        scaled_width = effective_gripper_width(raw_width, width_scale)
-        if scaled_width > maximum_width:
-            return (
-                f'effective gripper width {scaled_width:.3f}m exceeds configured maximum '
-                f'{maximum_width:.3f}m (raw={raw_width:.3f}m, scale={width_scale:.3f})'
-            )
+        width_error = validate_gripper_width(
+            candidate.required_width,
+            self._max_gripper_width,
+            self._grasp_width_scale,
+        )
+        if width_error:
+            return width_error
         return ''
 
     def _execute_vendor(self, candidate):
         arm = candidate.arm
         self._publish_status('opening', arm)
-        self._command_gripper(arm, float(self.get_parameter('gripper_open_position').value))
-        time.sleep(float(self.get_parameter('gripper_wait').value))
+        self._command_gripper(arm, self._gripper_open_pos)
+        self._wait_with_execution_health(self._gripper_wait)
         self._move_vendor_and_wait(arm, candidate.pregrasp_pose, 'pregrasp')
         self._move_vendor_and_wait(arm, candidate.grasp_pose, 'grasp')
         self._publish_status('closing', arm)
         position = width_to_gripper_position(
             candidate.required_width,
-            float(self.get_parameter('maximum_gripper_width').value),
-            float(self.get_parameter('gripper_open_position').value),
-            float(self.get_parameter('gripper_closed_position').value),
-            float(self.get_parameter('grasp_width_scale').value),
+            self._max_gripper_width,
+            self._gripper_open_pos,
+            self._gripper_closed_pos,
+            self._grasp_width_scale,
         )
         self._command_gripper(arm, position)
-        time.sleep(float(self.get_parameter('gripper_wait').value))
+        self._wait_with_execution_health(self._gripper_wait)
         lift = copy.deepcopy(candidate.grasp_pose)
-        lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        lift.pose.position.z += self._lift_distance
         self._move_vendor_and_wait(arm, lift, 'lift')
         self._publish_status('completed', arm)
 
     def _execute_vendor_rrt(self, candidate):
         arm = candidate.arm
         self._publish_status('opening', arm)
-        self._command_gripper(arm, float(self.get_parameter('gripper_open_position').value))
-        time.sleep(float(self.get_parameter('gripper_wait').value))
+        self._command_gripper(arm, self._gripper_open_pos)
+        self._wait_with_execution_health(self._gripper_wait)
         self._move_rrt_and_wait(arm, candidate.pregrasp_pose, 'pregrasp')
         self._move_rrt_and_wait(arm, candidate.grasp_pose, 'grasp')
         self._publish_status('closing', arm)
         position = width_to_gripper_position(
             candidate.required_width,
-            float(self.get_parameter('maximum_gripper_width').value),
-            float(self.get_parameter('gripper_open_position').value),
-            float(self.get_parameter('gripper_closed_position').value),
-            float(self.get_parameter('grasp_width_scale').value),
+            self._max_gripper_width,
+            self._gripper_open_pos,
+            self._gripper_closed_pos,
+            self._grasp_width_scale,
         )
         self._command_gripper(arm, position)
-        time.sleep(float(self.get_parameter('gripper_wait').value))
+        self._wait_with_execution_health(self._gripper_wait)
         lift = copy.deepcopy(candidate.grasp_pose)
-        lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        lift.pose.position.z += self._lift_distance
         self._move_rrt_and_wait(arm, lift, 'lift')
         self._publish_status('completed', arm)
 
@@ -477,18 +847,30 @@ class MotionExecutor(Node):
         target_position, target_orientation, trajectory = self._plan_vendor_rrt_pose(
             arm, pose, stage
         )
+        self._assert_execution_health()
         self._publish_status(f'executing_{stage}', arm)
-        self._vendor_trajectory_pub.publish(String(data=json.dumps({
+        message = String(data=json.dumps({
             'traj_deg': trajectory,
-            'duration': float(self.get_parameter('vendor_trajectory_duration').value),
-            'excluded_joints_name': list(self.get_parameter('vendor_excluded_joints').value),
+            'duration': self._vendor_trajectory_duration,
+            'excluded_joints_name': self._vendor_excluded_joints,
             'position_tolerance': 2.0,
-        })))
-        self._wait_for_eef(arm, target_position, target_orientation, stage)
+        }))
+        with self._condition:
+            command_feedback_sequence = self._eef_feedback_sequence
+            self._record_hardware_command()
+            self._vendor_trajectory_pub.publish(message)
+        self._wait_for_eef(
+            arm,
+            target_position,
+            target_orientation,
+            stage,
+            command_feedback_sequence,
+            self._vendor_trajectory_duration,
+        )
 
     def _validate_vendor_rrt_candidate(self, candidate):
         lift = copy.deepcopy(candidate.grasp_pose)
-        lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        lift.pose.position.z += self._lift_distance
         grasp_trajectory = None
         for stage, pose in (
             ('pregrasp', candidate.pregrasp_pose),
@@ -500,11 +882,7 @@ class MotionExecutor(Node):
                 grasp_trajectory = trajectory
         if grasp_trajectory:
             final = grasp_trajectory[-1]
-            names = (
-                self._joint_names['leg_waist']
-                + self._joint_names['left_arm']
-                + self._joint_names['right_arm']
-            )
+            names = vendor_trajectory_joint_names(self._joint_names)
             if len(final) != len(names):
                 raise RuntimeError(
                     f'vendor target trajectory has {len(final)} joints, expected {len(names)}'
@@ -547,7 +925,7 @@ class MotionExecutor(Node):
         planned = self._call_vendor_service(
             self._rrt_client,
             {
-                'max_step_size': float(self.get_parameter('vendor_rrt_max_step_size').value),
+                'max_step_size': self._vendor_rrt_max_step,
                 'q_end': q_end,
             },
             'RRT',
@@ -556,17 +934,16 @@ class MotionExecutor(Node):
         return target_position, target_orientation, trajectory
 
     def _call_vendor_service(self, client, payload, label):
-        timeout = float(self.get_parameter('vendor_service_timeout').value)
-        if not client.wait_for_service(timeout_sec=min(timeout, 2.0)):
+        if not client.wait_for_service(timeout_sec=min(self._vendor_service_timeout, 2.0)):
             raise RuntimeError(f'vendor {label} service is unavailable')
         request = SetString.Request()
         request.data = json.dumps(payload)
         future = client.call_async(request)
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + self._vendor_service_timeout
         while not future.done() and time.monotonic() < deadline:
             time.sleep(0.01)
         if not future.done():
-            raise TimeoutError(f'vendor {label} service timed out after {timeout:.1f}s')
+            raise TimeoutError(f'vendor {label} service timed out after {self._vendor_service_timeout:.1f}s')
         response = future.result()
         if response is None or not response.success:
             detail = 'no response' if response is None else response.result
@@ -583,9 +960,7 @@ class MotionExecutor(Node):
             'orientation': selected['rotation'],
         }
         position_error, angle_error = pose_error(selected_pose, target_position, target_orientation)
-        if position_error > float(self.get_parameter('position_tolerance').value) or angle_error > float(
-            self.get_parameter('orientation_tolerance').value
-        ):
+        if position_error > self._position_tolerance or angle_error > self._orientation_tolerance:
             raise RuntimeError(
                 f'vendor FK rejected IK for {arm}: position_error={position_error:.4f}, '
                 f'orientation_error={angle_error:.4f}'
@@ -601,35 +976,81 @@ class MotionExecutor(Node):
             current_poses[inactive]['position'],
             current_poses[inactive]['orientation'],
         )
-        if inactive_position_error > float(self.get_parameter('inactive_arm_position_tolerance').value) or inactive_angle_error > float(
-            self.get_parameter('inactive_arm_orientation_tolerance').value
-        ):
+        if inactive_position_error > self._inactive_pos_tol or inactive_angle_error > self._inactive_orient_tol:
             raise RuntimeError(
                 f'vendor IK moves inactive {inactive} arm too far: '
                 f'position_error={inactive_position_error:.4f}, '
                 f'orientation_error={inactive_angle_error:.4f}'
             )
 
-    def _wait_for_eef(self, arm, target_position, target_orientation, stage):
-        timeout = float(self.get_parameter('motion_timeout').value)
+    def _wait_for_eef(
+        self,
+        arm,
+        target_position,
+        target_orientation,
+        stage,
+        command_feedback_sequence,
+        commanded_duration,
+    ):
+        self._wait_for_eef_convergence(
+            arm,
+            target_position,
+            target_orientation,
+            stage,
+            command_feedback_sequence,
+            commanded_duration,
+        )
+
+    def _wait_for_eef_convergence(
+        self,
+        arm,
+        target_position,
+        target_orientation,
+        stage,
+        command_feedback_sequence,
+        commanded_duration,
+    ):
+        timeout = motion_completion_timeout(
+            self._motion_timeout,
+            commanded_duration,
+            self._motion_completion_margin,
+        )
         deadline = time.monotonic() + timeout
         last_position_error = None
         last_angle_error = None
         last_current = None
+        saw_post_command_feedback = False
+        last_eef_sequence = int(command_feedback_sequence)
+        within_tolerance_since = None
         with self._condition:
             while time.monotonic() < deadline:
-                current = self._current_poses.get(arm)
-                if current is not None:
+                self._assert_execution_health()
+                if self._eef_feedback_sequence > last_eef_sequence:
+                    last_eef_sequence = self._eef_feedback_sequence
+                    saw_post_command_feedback = True
+                    current = self._current_poses.get(arm)
                     position_error, angle_error = pose_error(current, target_position, target_orientation)
                     last_position_error = position_error
                     last_angle_error = angle_error
                     last_current = copy.deepcopy(current)
-                    if position_error <= float(self.get_parameter('position_tolerance').value) and angle_error <= float(
-                        self.get_parameter('orientation_tolerance').value
+                    if (
+                        position_error <= self._position_tolerance
+                        and angle_error <= self._orientation_tolerance
                     ):
-                        return
+                        now = time.monotonic()
+                        if within_tolerance_since is None:
+                            within_tolerance_since = now
+                        elif (
+                            now - within_tolerance_since
+                            >= self._motion_settle_time
+                        ):
+                            return
+                    else:
+                        within_tolerance_since = None
                 self._condition.wait(timeout=0.1)
         detail = f'{stage} pose did not converge within {timeout:.1f}s'
+        if not saw_post_command_feedback:
+            detail += '; no valid dual-arm EEF feedback arrived after the command'
         if last_position_error is not None and last_angle_error is not None:
             detail += (
                 f': position_error={last_position_error:.4f}m, '
@@ -641,39 +1062,19 @@ class MotionExecutor(Node):
 
     def _move_vendor_and_wait(self, arm, pose, stage):
         self._publish_status(stage, arm)
-        self._publish_vendor_pose(arm, pose)
-        timeout = float(self.get_parameter('motion_timeout').value)
-        deadline = time.monotonic() + timeout
+        command_feedback_sequence = self._publish_vendor_pose(arm, pose)
         target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
-        last_position_error = None
-        last_angle_error = None
-        last_current = None
-        with self._condition:
-            while time.monotonic() < deadline:
-                current = self._current_poses.get(arm)
-                if current is not None:
-                    position_error, angle_error = pose_error(
-                        current, target_position, target_orientation
-                    )
-                    last_position_error = position_error
-                    last_angle_error = angle_error
-                    last_current = copy.deepcopy(current)
-                    if position_error <= float(self.get_parameter('position_tolerance').value) and angle_error <= float(
-                        self.get_parameter('orientation_tolerance').value
-                    ):
-                        return
-                self._condition.wait(timeout=0.1)
-        detail = f'{stage} pose did not converge within {timeout:.1f}s'
-        if last_position_error is not None and last_angle_error is not None:
-            detail += (
-                f': position_error={last_position_error:.4f}m, '
-                f'orientation_error={last_angle_error:.4f}rad, '
-                f'target_position={[round(float(value), 4) for value in target_position]}, '
-                f'current_position={[round(float(value), 4) for value in last_current["position"]]}'
-            )
-        raise TimeoutError(detail)
+        self._wait_for_eef_convergence(
+            arm,
+            target_position,
+            target_orientation,
+            stage,
+            command_feedback_sequence,
+            self._vendor_trajectory_duration,
+        )
 
     def _publish_vendor_pose(self, arm, pose):
+        self._assert_execution_health()
         with self._condition:
             current = copy.deepcopy(self._current_poses)
         target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
@@ -683,9 +1084,15 @@ class MotionExecutor(Node):
             target_orientation,
             current,
         )
-        self._vendor_pose_pub.publish(String(data=json.dumps(payload)))
+        with self._condition:
+            command_feedback_sequence = self._eef_feedback_sequence
+            self._record_hardware_command()
+            self._vendor_pose_pub.publish(String(data=json.dumps(payload)))
+        return command_feedback_sequence
 
     def _tcp_to_eef_pose_values(self, arm, pose):
+        tcp_translation = self._left_tcp_translation if arm == 'left' else self._right_tcp_translation
+        tcp_quaternion = self._left_tcp_quaternion if arm == 'left' else self._right_tcp_quaternion
         return tcp_target_to_eef(
             [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z],
             [
@@ -694,16 +1101,16 @@ class MotionExecutor(Node):
                 pose.pose.orientation.z,
                 pose.pose.orientation.w,
             ],
-            self.get_parameter(f'{arm}_tcp_translation').value,
-            self.get_parameter(f'{arm}_tcp_quaternion').value,
+            tcp_translation,
+            tcp_quaternion,
         )
 
     def _validate_moveit_candidate(self, candidate):
         self._ensure_moveit()
         component = self._moveit_components[candidate.arm]
-        tip = str(self.get_parameter(f'moveit_{candidate.arm}_tip').value)
+        tip = self._moveit_left_tip if candidate.arm == 'left' else self._moveit_right_tip
         lift = copy.deepcopy(candidate.grasp_pose)
-        lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        lift.pose.position.z += self._lift_distance
         grasp_result = None
         for stage, pose in (
             ('pregrasp', candidate.pregrasp_pose),
@@ -729,26 +1136,28 @@ class MotionExecutor(Node):
     def _execute_moveit(self, candidate, execute_with_moveit=False):
         self._ensure_moveit()
         component = self._moveit_components[candidate.arm]
-        tip = str(self.get_parameter(f'moveit_{candidate.arm}_tip').value)
-        self._command_gripper(candidate.arm, float(self.get_parameter('gripper_open_position').value))
-        time.sleep(float(self.get_parameter('gripper_wait').value))
+        tip = self._moveit_left_tip if candidate.arm == 'left' else self._moveit_right_tip
+        self._command_gripper(candidate.arm, self._gripper_open_pos)
+        self._wait_with_execution_health(self._gripper_wait)
         self._plan_and_execute_moveit(component, candidate.arm, candidate.pregrasp_pose, tip, 'pregrasp', execute_with_moveit)
         self._plan_and_execute_moveit(component, candidate.arm, candidate.grasp_pose, tip, 'grasp', execute_with_moveit)
         close_position = width_to_gripper_position(
             candidate.required_width,
-            float(self.get_parameter('maximum_gripper_width').value),
-            float(self.get_parameter('gripper_open_position').value),
-            float(self.get_parameter('gripper_closed_position').value),
-            float(self.get_parameter('grasp_width_scale').value),
+            self._max_gripper_width,
+            self._gripper_open_pos,
+            self._gripper_closed_pos,
+            self._grasp_width_scale,
         )
         self._command_gripper(candidate.arm, close_position)
-        time.sleep(float(self.get_parameter('gripper_wait').value))
+        self._wait_with_execution_health(self._gripper_wait)
         lift = copy.deepcopy(candidate.grasp_pose)
-        lift.pose.position.z += float(self.get_parameter('lift_distance').value)
+        lift.pose.position.z += self._lift_distance
         self._plan_and_execute_moveit(component, candidate.arm, lift, tip, 'lift', execute_with_moveit)
 
     def _ensure_moveit(self):
         if self._moveit is not None:
+            if not self._environment_scene_loaded:
+                self._load_environment_scene()
             return
         try:
             from moveit.planning import MoveItPy
@@ -756,38 +1165,267 @@ class MotionExecutor(Node):
             raise RuntimeError(f'moveit_py import failed in motion executor environment: {exc}') from exc
         moveit_dir = Path(get_package_share_directory('adaptive_object_grasping')) / 'config' / 'moveit'
         config_dict = yaml.safe_load((moveit_dir / 'ompl_planning.yaml').read_text())
+        robot_description = (moveit_dir / 'robot_v2_2.urdf').read_text().replace(
+            '../meshes/robot_v2_2/',
+            'package://adaptive_object_grasping/meshes/robot_v2_2/',
+        )
         config_dict.update({
-            'robot_description': (moveit_dir / 'robot_v2_2.urdf').read_text(),
+            # MoveItPy does not resolve paths relative to the URDF file.  Keep
+            # collision meshes package-addressable, exactly as bringup.launch.py
+            # does for robot_state_publisher.
+            'robot_description': robot_description,
             'robot_description_semantic': (moveit_dir / 'autolife_s2.srdf').read_text(),
             'robot_description_kinematics': yaml.safe_load((moveit_dir / 'kinematics.yaml').read_text()),
         })
+        # MoveItPy requires a loadable controller-manager plugin even though
+        # execution is disabled.  Robot 306 loads the official plugin from the
+        # project-local ROS overlay prepared by install_moveit_overlay.sh.
+        # The dummy action is never called; trajectories are converted by the
+        # separately gated vendor adapter below.
+        config_dict.update(
+            yaml.safe_load((moveit_dir / 'moveit_controllers.yaml').read_text())
+        )
         self._moveit = MoveItPy(
             node_name='adaptive_grasp_moveit',
             config_dict=config_dict,
         )
         for arm in ('left', 'right'):
-            group = str(self.get_parameter(f'moveit_{arm}_group').value)
+            group = self._moveit_left_group if arm == 'left' else self._moveit_right_group
             self._moveit_components[arm] = self._moveit.get_planning_component(group)
+        self._load_environment_scene()
+
+    def _plan_visible_reset_service(self, _request, response):
+        """Plan to the site-captured pose without exposing an execution path."""
+
+        if not self._execution_lock.acquire(blocking=False):
+            response.message = 'motion executor is busy'
+            return response
+        try:
+            self._ensure_moveit()
+            path = self._package_config_path(self._visible_reset_pose_path)
+            data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+            targets_deg = validate_visible_reset_pose(data, require_verified=True)
+            monitor = self._moveit.get_planning_scene_monitor()
+            with monitor.read_only() as scene:
+                target = copy.copy(scene.current_state)
+            for arm, group in (('left', self._moveit_left_group), ('right', self._moveit_right_group)):
+                target.set_joint_group_active_positions(
+                    group,
+                    np.radians(np.asarray(targets_deg[arm], dtype=np.float64)),
+                )
+            target.update()
+            with monitor.read_only() as scene:
+                if scene.is_state_colliding(target, 'Both_Arms', False):
+                    raise RuntimeError('visible reset target collides with robot or environment')
+            # The vendor adapter cannot execute an atomic bimanual trajectory.
+            # Validate the same sequential contract used by real execution:
+            # left arm first, then right arm from the left-at-target state.
+            with monitor.read_only() as scene:
+                current = copy.copy(scene.current_state)
+            left_goal = copy.copy(current)
+            left_goal.set_joint_group_active_positions(
+                self._moveit_left_group,
+                np.radians(np.asarray(targets_deg['left'], dtype=np.float64)),
+            )
+            left_goal.update()
+            left_result = self._plan_reset_arm(
+                self._moveit_components['left'], current, left_goal, 'left'
+            )
+            right_result = self._plan_reset_arm(
+                self._moveit_components['right'], left_goal, target, 'right'
+            )
+            left_trajectory = left_result.trajectory.get_robot_trajectory_msg().joint_trajectory
+            right_trajectory = right_result.trajectory.get_robot_trajectory_msg().joint_trajectory
+            self._publish_target_joint_state({
+                **dict(zip(ARM_JOINTS['left'], np.radians(targets_deg['left']))),
+                **dict(zip(ARM_JOINTS['right'], np.radians(targets_deg['right']))),
+            })
+            response.success = True
+            response.message = (
+                'visible reset dry-run planned sequentially with '
+                f'{len(left_trajectory.points)} left-arm and '
+                f'{len(right_trajectory.points)} right-arm points; '
+                'target ghost published; no hardware command was sent'
+            )
+        except Exception as exc:
+            response.message = f'visible reset planning rejected: {exc}'
+        finally:
+            self._execution_lock.release()
+        return response
+
+    def _plan_reset_arm(self, component, start_state, goal_state, arm):
+        component.set_start_state(robot_state=start_state)
+        component.set_goal_state(robot_state=goal_state)
+        from moveit.planning import PlanRequestParameters
+        params = PlanRequestParameters(self._moveit, 'plan_request_params')
+        params.planning_pipeline = 'ompl'
+        params.planner_id = 'RRTConnectkConfigDefault'
+        params.planning_time = self._moveit_planning_time
+        params.planning_attempts = self._moveit_planning_attempts
+        params.max_velocity_scaling_factor = self._moveit_max_velocity_scaling
+        params.max_acceleration_scaling_factor = self._moveit_max_acceleration_scaling
+        result = component.plan(single_plan_parameters=params)
+        if not result:
+            raise RuntimeError(f'MoveIt could not plan the {arm}-arm visible-reset stage')
+        trajectory = result.trajectory.get_robot_trajectory_msg().joint_trajectory
+        if not trajectory.points:
+            raise RuntimeError(f'MoveIt returned an empty {arm}-arm reset trajectory')
+        return result
+
+    def _package_config_path(self, configured):
+        path = Path(configured).expanduser()
+        if path.is_absolute():
+            return path
+        if '..' in path.parts:
+            raise RuntimeError('relative config path escapes the installed package share')
+        package_share = Path(get_package_share_directory('adaptive_object_grasping')).resolve()
+        # With colcon --symlink-install, config is intentionally a symlink to
+        # the source tree. Resolving the final path would reject that supported
+        # layout as an escape. The lexical traversal check above still prevents
+        # a parameter from walking outside the package share.
+        return package_share / path
+
+    def _load_environment_scene(self):
+        if not self._require_environment_scene:
+            self._environment_scene_loaded = True
+            return
+        try:
+            from moveit_msgs.msg import CollisionObject
+            from shape_msgs.msg import SolidPrimitive
+            from geometry_msgs.msg import Pose
+
+            path = self._package_config_path(self._environment_scene_path)
+            data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+            objects = validate_environment_scene(data, require_verified=True)
+            monitor = self._moveit.get_planning_scene_monitor()
+            with monitor.read_write() as scene:
+                for item in objects:
+                    collision = CollisionObject()
+                    collision.header.frame_id = item['frame_id']
+                    collision.id = item['id']
+                    collision.operation = CollisionObject.ADD
+                    primitive = SolidPrimitive()
+                    primitive.type = SolidPrimitive.BOX
+                    primitive.dimensions = item['dimensions_m']
+                    pose = Pose()
+                    pose.position.x, pose.position.y, pose.position.z = item['position_m']
+                    (
+                        pose.orientation.x,
+                        pose.orientation.y,
+                        pose.orientation.z,
+                        pose.orientation.w,
+                    ) = item['quaternion_xyzw']
+                    collision.primitives = [primitive]
+                    collision.primitive_poses = [pose]
+                    scene.apply_collision_object(collision)
+                if scene.is_state_colliding(scene.current_state, 'Both_Arms', False):
+                    raise RuntimeError(
+                        'current robot state collides with the calibrated environment scene'
+                    )
+            self._publish_status('environment_scene_loaded', f'{len(objects)} objects from {path}')
+            self._environment_scene_loaded = True
+        except Exception as exc:
+            self._environment_scene_loaded = False
+            raise RuntimeError(f'calibrated environment scene rejected: {exc}') from exc
 
     def _plan_moveit(self, component, pose, tip, stage):
         self._publish_status(f'planning_{stage}', tip)
         component.set_start_state_to_current_state()
-        component.set_goal_state(pose_stamped_msg=pose, pose_link=tip)
+        group = (
+            self._moveit_left_group
+            if tip == self._moveit_left_tip
+            else self._moveit_right_group
+        )
+        # Fail with an actionable reason before spending the full OMPL budget.
+        # get_start_state() returns a detached RobotState; set_from_ik mutates
+        # only this diagnostic copy and never commands the robot.
+        with self._moveit.get_planning_scene_monitor().read_only() as scene:
+            ik_probe = copy.copy(scene.current_state)
+        current_pose = ik_probe.get_pose(tip)
+        current_pose_probe = copy.copy(ik_probe)
+        if not current_pose_probe.set_from_ik(
+            group,
+            current_pose,
+            tip,
+            min(0.5, self._moveit_planning_time),
+        ):
+            raise RuntimeError(
+                f'MoveIt KDL IK self-check failed for the current {group} '
+                f'{tip} pose; verify the URDF chain and joint feedback mapping'
+            )
+        ik_solution = self._solve_moveit_ik(ik_probe, group, pose.pose, tip)
+        if ik_solution is None:
+            position = pose.pose.position
+            orientation = pose.pose.orientation
+            raise RuntimeError(
+                f'MoveIt KDL IK found no {group} solution for {stage} '
+                f'(tip={tip}, frame={pose.header.frame_id}, '
+                f'position=[{position.x:.4f},{position.y:.4f},{position.z:.4f}], '
+                f'quaternion=[{orientation.x:.4f},{orientation.y:.4f},'
+                f'{orientation.z:.4f},{orientation.w:.4f}])'
+            )
+        # Reuse the collision-free IK state that was actually validated.  A
+        # pose goal would invoke a second, potentially single-seed IK search.
+        component.set_goal_state(robot_state=ik_solution)
         try:
             from moveit.planning import PlanRequestParameters
             params = PlanRequestParameters(self._moveit, 'plan_request_params')
             params.planning_pipeline = 'ompl'
             params.planner_id = 'RRTConnectkConfigDefault'
-            params.planning_time = float(self.get_parameter('moveit_planning_time').value)
-            params.planning_attempts = int(self.get_parameter('moveit_planning_attempts').value)
-            params.max_velocity_scaling_factor = float(self.get_parameter('moveit_max_velocity_scaling').value)
-            params.max_acceleration_scaling_factor = float(self.get_parameter('moveit_max_acceleration_scaling').value)
+            params.planning_time = self._moveit_planning_time
+            params.planning_attempts = self._moveit_planning_attempts
+            params.max_velocity_scaling_factor = self._moveit_max_velocity_scaling
+            params.max_acceleration_scaling_factor = self._moveit_max_acceleration_scaling
             result = component.plan(single_plan_parameters=params)
         except Exception as exc:
             raise RuntimeError(f'MoveIt request setup or planning failed for {stage}: {exc}') from exc
         if not result:
             raise RuntimeError(f'MoveIt planning failed for {stage}')
         return result
+
+    def _solve_moveit_ik(self, current_state, group, target_pose, tip):
+        """Try deterministic redundant-joint seeds and reject colliding IK."""
+
+        current = np.asarray(
+            current_state.get_joint_group_positions(group), dtype=np.float64
+        )
+        if current.shape != (7,) or not np.isfinite(current).all():
+            raise RuntimeError(f'{group} current joint seed is invalid')
+        # The S2 arm is redundant.  Shoulder-inner, upper-arm and forearm
+        # offsets cover alternate elbow/swivel branches without random output.
+        seed_offsets = (
+            (0.0, 0.0, 0.0),
+            (0.35, 0.0, 0.0), (-0.35, 0.0, 0.0),
+            (0.0, 0.45, 0.0), (0.0, -0.45, 0.0),
+            (0.0, 0.0, 0.55), (0.0, 0.0, -0.55),
+            (0.35, 0.35, 0.45), (-0.35, -0.35, -0.45),
+            (0.55, -0.35, 0.55), (-0.55, 0.35, -0.55),
+        )
+        monitor = self._moveit.get_planning_scene_monitor()
+        for shoulder_inner, upper_arm, forearm in seed_offsets:
+            probe = copy.copy(current_state)
+            seed = current.copy()
+            seed[0] += shoulder_inner
+            seed[2] += upper_arm
+            seed[4] += forearm
+            try:
+                probe.set_joint_group_active_positions(group, seed)
+                solved = probe.set_from_ik(
+                    group,
+                    target_pose,
+                    tip,
+                    min(0.25, self._moveit_planning_time),
+                )
+                if not solved:
+                    continue
+                probe.update()
+                with monitor.read_only() as scene:
+                    if scene.is_state_colliding(probe, group, False):
+                        continue
+                return probe
+            except Exception as exc:
+                self.get_logger().debug(f'{group} IK seed rejected: {exc}')
+        return None
 
     def _tcp_pose_to_eef_pose(self, arm, pose):
         target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
@@ -809,16 +1447,34 @@ class MotionExecutor(Node):
         if execute_with_moveit:
             self._moveit.execute(result.trajectory, controllers=[])
             return
-        trajectory = self._moveit_result_to_vendor_trajectory(arm, result)
+        trajectory, planned_duration = self._moveit_result_to_vendor_trajectory(
+            arm, result
+        )
+        vendor_duration = max(
+            self._vendor_trajectory_duration, planned_duration
+        )
+        self._assert_execution_health()
         self._publish_status(f'executing_{stage}', arm)
-        self._vendor_trajectory_pub.publish(String(data=json.dumps({
+        message = String(data=json.dumps({
             'traj_deg': trajectory,
-            'duration': float(self.get_parameter('vendor_trajectory_duration').value),
-            'excluded_joints_name': list(self.get_parameter('vendor_excluded_joints').value),
+            # Never execute faster than MoveIt's time-parameterized result.
+            'duration': vendor_duration,
+            'excluded_joints_name': self._vendor_excluded_joints,
             'position_tolerance': 2.0,
-        })))
+        }))
+        with self._condition:
+            command_feedback_sequence = self._eef_feedback_sequence
+            self._record_hardware_command()
+            self._vendor_trajectory_pub.publish(message)
         target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)
-        self._wait_for_eef(arm, target_position, target_orientation, stage)
+        self._wait_for_eef(
+            arm,
+            target_position,
+            target_orientation,
+            stage,
+            command_feedback_sequence,
+            vendor_duration,
+        )
 
     def _moveit_result_to_vendor_trajectory(self, arm, result):
         trajectory_message = result.trajectory.get_robot_trajectory_msg()
@@ -832,6 +1488,15 @@ class MotionExecutor(Node):
         if current_joints is None:
             raise RuntimeError('current joint feedback is required to execute MoveIt2 trajectory')
         trajectory = []
+        times = []
+        current_whole_body = [
+            float(value)
+            for value in (
+                current_joints['leg_waist']
+                + current_joints['left_arm']
+                + current_joints['right_arm']
+            )
+        ]
         for point in joint_trajectory.points:
             planned_degrees = dict(zip(names, [float(value) * 180.0 / 3.141592653589793 for value in point.positions]))
             leg_waist = list(current_joints['leg_waist'])
@@ -842,11 +1507,25 @@ class MotionExecutor(Node):
                 if joint_name in planned_degrees:
                     target_arm[index] = planned_degrees[joint_name]
             trajectory.append([float(value) for value in (leg_waist + left_arm + right_arm)])
-        return trajectory
+            times.append(
+                float(point.time_from_start.sec)
+                + float(point.time_from_start.nanosec) / 1_000_000_000.0
+            )
+        if times and times[0] > 1e-9:
+            trajectory.insert(0, current_whole_body)
+            times.insert(0, 0.0)
+        return resample_trajectory_for_uniform_timing(trajectory, times)
 
     def _command_gripper(self, arm, position):
+        self._assert_execution_health()
+        position = validated_gripper_command(
+            position,
+            self._gripper_open_pos,
+            self._gripper_closed_pos,
+        )
         key = f'{arm}_gripper_target_joints_position'
-        self._gripper_pub.publish(String(data=json.dumps({key: [float(position)]})))
+        self._record_hardware_command()
+        self._gripper_pub.publish(String(data=json.dumps({key: [position]})))
 
     def _publish_status(self, state, detail):
         self._status_pub.publish(String(data=json.dumps({'state': state, 'detail': detail})))

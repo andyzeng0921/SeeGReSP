@@ -2,6 +2,9 @@ int32 track_id
 string label
 string preferred_arm
 bool execute
+# Required only when execute=true. This is an explicit operator acknowledgement,
+# not an authentication secret.
+string execution_confirmation
 float32 maximum_tracking_time
 float32 required_stable_duration
 ---

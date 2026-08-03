@@ -4,17 +4,40 @@ adaptive_grasp_motion_executor:
     dry_run: true
     allow_hardware_execution: false
     require_hardware_ready: true
+    hardware_status_maximum_age: 2.0
+    require_site_acceptance: true
+    site_acceptance_path: config/site_acceptance.yaml
+    require_environment_scene: true
+    environment_scene_path: config/environment_scene.yaml
+    visible_reset_pose_path: config/visible_reset_pose.yaml
+    hardware_execution_confirmation: I_HAVE_CHECKED_ESTOP_AND_WORKSPACE
     base_frame: Link_Zero_Point
     topic_suffix: 0_306
     workspace_minimum: [0.10, -0.75, 0.20]
     workspace_maximum: [0.85, 0.75, 1.45]
     motion_timeout: 12.0
+    # Feedback wait is max(motion_timeout, commanded_duration + this margin).
+    motion_completion_margin: 3.0
+    # Require repeated post-command EEF samples inside tolerance before advancing.
+    motion_settle_time: 0.30
+    # Candidates carry the source RGB-D measurement stamp, not merely a plan time.
+    maximum_candidate_age: 1.0
+    # MoveIt initializes lazily on the first dry-run.  Permit candidate ranking
+    # to finish without weakening the stricter pre-execution freshness gate.
+    dry_run_maximum_candidate_age: 5.0
+    candidate_future_tolerance: 0.05
     position_tolerance: 0.04
     orientation_tolerance: 0.15
     maximum_gripper_width: 0.095
     grasp_width_scale: 0.5
     gripper_open_position: 10.0
     gripper_closed_position: 330.0
+    # Nominal vendor feedback calibration: 0=open, 360=closed. Re-verify this
+    # mapping at the physical fingers before any collision-sensitive execution.
+    gripper_feedback_open_position: 0.0
+    gripper_feedback_closed_position: 360.0
+    urdf_gripper_open_position: -1.333
+    urdf_gripper_closed_position: 1.0
     gripper_wait: 1.0
     lift_distance: 0.10
     left_tcp_translation: [0.20187, -0.00014, -0.03035]
@@ -25,6 +48,7 @@ adaptive_grasp_motion_executor:
     right_tcp_quaternion: [-0.70710678, 0.0, 0.0, 0.70710678]
     moveit_left_group: Left_Arm
     moveit_right_group: Right_Arm
+    moveit_dual_arm_group: Both_Arms
     moveit_left_tip: Link_Left_Wrist_Lower_to_Gripper
     moveit_right_tip: Link_Right_Wrist_Lower_to_Gripper
     moveit_planning_time: 5.0
@@ -32,12 +56,26 @@ adaptive_grasp_motion_executor:
     moveit_max_velocity_scaling: 0.25
     moveit_max_acceleration_scaling: 0.25
     enable_pbvs_hardware_follow: false
-    pbvs_follow_backend: moveit_servo
-    moveit_servo_pose_topic: /servo_node/pose_target_cmds
-    pbvs_command_rate: 10.0
     vendor_service_timeout: 15.0
     vendor_rrt_max_step_size: 0.06
     vendor_trajectory_duration: 4.0
     vendor_excluded_joints: [Joint_Ankle, Joint_Knee, Joint_Waist_Pitch, Joint_Waist_Yaw]
+    # Canonical AutoLife S2 feedback and vendor 18-value trajectory order:
+    # waist/leg 4 + left arm 7 + right arm 7. These lists are checked at startup.
+    leg_waist_joint_names:
+      [Joint_Ankle, Joint_Knee, Joint_Waist_Pitch, Joint_Waist_Yaw]
+    left_arm_joint_names:
+      [Joint_Left_Shoulder_Inner, Joint_Left_Shoulder_Outer, Joint_Left_UpperArm,
+       Joint_Left_Elbow, Joint_Left_Forearm, Joint_Left_Wrist_Upper,
+       Joint_Left_Wrist_Lower]
+    right_arm_joint_names:
+      [Joint_Right_Shoulder_Inner, Joint_Right_Shoulder_Outer, Joint_Right_UpperArm,
+       Joint_Right_Elbow, Joint_Right_Forearm, Joint_Right_Wrist_Upper,
+       Joint_Right_Wrist_Lower]
+    neck_joint_names: [Joint_Neck_Roll, Joint_Neck_Pitch, Joint_Neck_Yaw]
+    enable_joints_before_execute: true
+    # Direct writes to the vendor's private /dev/shm PID flag are no longer
+    # performed by this project. Use only a documented vendor startup path.
+    enable_pid_loop_before_execute: false
     inactive_arm_position_tolerance: 0.06
     inactive_arm_orientation_tolerance: 0.30

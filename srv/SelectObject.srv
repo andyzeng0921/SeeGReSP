@@ -1,7 +1,9 @@
 int32 track_id
 string label
 string preferred_arm
+bool include_observation
 ---
 bool accepted
 string message
 adaptive_object_grasping/TrackedObject selected
+adaptive_object_grasping/SelectedObjectObservation observation

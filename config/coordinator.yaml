@@ -1,7 +1,22 @@
 adaptive_grasp_coordinator:
   ros__parameters:
     service_timeout: 30.0
+    execution_service_timeout: 180.0
     default_tracking_timeout: 12.0
     post_stable_confirmation: 0.35
     minimum_grasp_score: 0.25
     skip_pbvs_tracking: true
+    # Preserve the 0.50 s freshness gate while briefly waiting for the next
+    # YOLO result when selection lands between inference cycles.
+    fresh_selection_retry_timeout: 2.0
+    fresh_selection_retry_period: 0.05
+    maximum_post_inference_target_shift_m: 0.015
+    maximum_post_inference_bbox_center_shift_px: 12.0
+    minimum_post_inference_bbox_iou: 0.60
+    # ---- RoboStral Navigate integration ----
+    # When true, navigate to the approximate target location before attempting
+    # a grasp.  Requires the navigation node to be launched separately
+    # (bringup navigation:=true) and a model checkpoint in config/navigation.yaml.
+    navigate_before_grasp: false
+    navigate_service_timeout: 180.0
+    navigate_maximum_steps: 80

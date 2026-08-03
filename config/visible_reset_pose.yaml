@@ -1,0 +1,9 @@
+# Captured only after both wrists and TCPs are depth-consistent in one exact frame.
+robot_id: 306
+source_sample:
+operator:
+timestamp:
+verified: false
+joint_positions_deg:
+  left: {}
+  right: {}

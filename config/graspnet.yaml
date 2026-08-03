@@ -1,10 +1,8 @@
 graspnet_server:
   ros__parameters:
-    color_topic: /head_camera/color/image_raw
-    depth_topic: /head_camera/aligned_depth_to_color/image_raw
-    camera_info_topic: /head_camera/color/camera_info
-    selected_mask_topic: /selected_object_mask
-    use_selected_mask: false
+    # GraspNet intentionally does not subscribe to live image topics. YOLO
+    # stores one exact RGB-D/intrinsics/mask observation under the project
+    # runtime directory; the service carries only token, size and SHA-256.
     base_frame: Link_Zero_Point
     graspnet_root: third_party/graspnet-baseline
     checkpoint_path: models/graspnet/checkpoint-rs.tar
@@ -14,13 +12,22 @@ graspnet_server:
     minimum_target_points: 300
     depth_scale: 0.001
     target_depth_band: 0.15
-    collision_threshold: 0.00
+    # Enable the official model-free collision filter. A zero value disables it.
+    collision_threshold: 0.01
     collision_voxel_size: 0.01
+    # Only geometry close enough to intersect the gripper/0.12 m approach path
+    # is retained, then deterministically reduced at the detector voxel size.
+    collision_scene_margin: 0.20
+    auto_arm_deadband_y: 0.04
+    prevent_cross_body_grasps: true
     minimum_grasp_score: 0.15
     maximum_gripper_width: 0.15
     maximum_candidates: 20
     maximum_raw_candidates: 100
-    inference_attempts: 3
+    # One inference per fresh observation. Retrying the full network on the
+    # same frame only makes its geometry stale; retry at the action level with
+    # a newly selected observation instead.
+    inference_attempts: 1
     pregrasp_offset: 0.12
     approach_axis: 0
     horizontal_grasp_filter_enabled: true
@@ -28,7 +35,32 @@ graspnet_server:
     vertical_axis: 2
     maximum_approach_tilt_degrees: 30.0
     maximum_closing_tilt_degrees: 30.0
-    apply_grasp_depth: true
+    # Bottles are approximately rotationally symmetric around the vertical
+    # axis. Preserve every GraspNet contact/approach line, but roll rejected
+    # frames so the jaws close laterally. +/-90 are jaw-direction equivalents
+    # and can expose different wrist IK branches; no tilt threshold is relaxed.
+    bottle_side_grasp_enabled: true
+    bottle_side_grasp_labels: [bottle]
+    bottle_side_roll_degrees: [90.0, -90.0, 180.0]
+    # Generate a bottle side approach from the live arm TCP toward each model
+    # grasp center. These rows enter GraspNet's official scene-cloud collision
+    # filter before MoveIt and are ordered by proximity to the current wrist.
+    bottle_wrist_aligned_enabled: true
+    bottle_wrist_aligned_use_target_center: true
+    left_tcp_frame: left_grasp_tcp
+    right_tcp_frame: right_grasp_tcp
+    # Keep execution at the collision-checked GraspNet translation. Enabling
+    # depth offset requires a second swept-volume check with calibrated S2 fingers.
+    apply_grasp_depth: false
     grasp_depth_scale: 1.0
     maximum_grasp_depth_offset: 0.05
     tf_timeout: 0.2
+    maximum_target_age_seconds: 0.50
+    # The source may age while the 0.7 s network runs, but the coordinator must
+    # obtain a new <=0.35 s observation and prove the target did not move before
+    # any candidate is restamped for planning.
+    maximum_post_inference_source_age_seconds: 1.50
+    maximum_future_skew_seconds: 0.02
+    observation_store_directory: runtime/selected_observations
+    maximum_observation_payload_bytes: 67108864
+    preload_backend: true

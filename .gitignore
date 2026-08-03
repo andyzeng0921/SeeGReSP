@@ -11,3 +11,34 @@ models/
 third_party/
 *.pt
 *.pth
+*.onnx
+*.engine
+
+# Per-experiment environments are reproducible from requirements files.
+experiments/**/.deps/
+experiments/**/.venv/
+
+# Local credentials and machine-specific overrides must never be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.db
+credentials*
+secrets*
+
+# Public templates are tracked; signed acceptance and active agent config stay local.
+config/site_acceptance.yaml
+agent_workspace/openclaw.json
+
+# Runtime recordings and transfer archives.
+*.bag
+*.db3
+*.mcap
+*.tar
+*.tar.gz
+*.zip

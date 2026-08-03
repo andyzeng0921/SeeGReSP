@@ -1,0 +1,70 @@
+# Robot 306 physical acceptance record template.
+#
+# Do not change a result to true unless the named on-site operator actually
+# performed the measurement/test. tools/graspctl.sh execute enforces this file.
+robot_id: 306
+controller_adapter:
+  vendor_package: autolife_robot_arm
+  vendor_version: 2.2.3+build3
+  trajectory_topic: /topic_arm_move_joints_trajectory_0_306
+  trajectory_subscribers_observed: 1
+  left_control_mode: position
+  right_control_mode: position
+  verified: true
+
+camera_extrinsic:
+  method: hand_eye_calibration_board
+  result: nominal_urdf_only
+  translation_m: [0.0, 0.0, 0.0]
+  quaternion_xyzw: [0.0, 0.0, 0.7071067812, 0.7071067812]
+  reprojection_error_px:
+  operator:
+  timestamp:
+  verified: false
+
+left_tcp:
+  method: physical_pivot_or_known_fixture
+  result: nominal_cad_only
+  translation_m: [0.20187, -0.00014, -0.03035]
+  quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+  position_error_m:
+  operator:
+  timestamp:
+  verified: false
+
+right_tcp:
+  method: physical_pivot_or_known_fixture
+  result: nominal_cad_only
+  translation_m: [0.20188, 0.0, -0.03035]
+  quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+  position_error_m:
+  operator:
+  timestamp:
+  verified: false
+
+gripper_mapping:
+  method: measure_finger_opening_at_vendor_0_and_360
+  result: nominal_urdf_limits_only
+  vendor_open_position: 0.0
+  vendor_closed_position: 360.0
+  urdf_open_position: -1.333
+  urdf_closed_position: 1.0
+  maximum_finger_position_error_m:
+  operator:
+  timestamp:
+  verified: false
+
+emergency_stop:
+  ros_status_interface_available: true
+  physical_button_stopped_motion_test:
+  reset_and_reenable_test:
+  operator:
+  timestamp:
+  verified: false
+
+workspace:
+  collision_zone_cleared:
+  observer_at_emergency_stop:
+  operator:
+  timestamp:
+  verified: false

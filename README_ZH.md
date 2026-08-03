@@ -1,170 +1,163 @@
-# 自适应任意物体抓取功能包
+# Robot 306 自适应视觉抓取
 
-包名：`adaptive_object_grasping`
+ROS 2 包名：`adaptive_object_grasping`
 
-该包将高速 YOLO 多目标识别与跟踪、用户目标选择、受限距离 PBVS 跟随、
-目标稳定性判断、GraspNet 6D 抓取位姿估计，以及 MoveIt 2/机器人厂商执行
-接口串成一个可取消的 ROS 2 抓取 Action。
-
-## 当前实现边界
-
-- YOLO 只能识别模型训练类别。默认 `yolo11n-seg.pt` 识别 COCO 类别；需要
-  新类别时应换成自训练分割权重或兼容的开放词汇 YOLO 模型。
-- PBVS 当前使用头部 RGB-D 的目标三维位置，保持夹爪与目标的初始相对偏移，
-  主要增强目标被短距离挪动时的观赏性和鲁棒性。它不是无边界追逐算法。
-- GraspNet 使用用户另行安装的官方 baseline 和 RealSense 权重。本包不复制
-  其受限许可证源码或模型。
-- MoveIt 是推荐执行后端；当前机器人还没有完整 MoveIt 配置。厂商末端位姿
-  后端可用于后续联调，但默认被硬件锁禁止。
-
-## 已查到的真机参数
-
-详细报告见 `docs/HARDWARE_DISCOVERY.md`。当前已实测头部 RealSense 共享内存
-为 640 x 480、60 FPS、RGB/深度对齐，内参为：
+项目唯一部署目录：
 
 ```text
-fx=606.8763427734375  fy=606.8387451171875
-cx=329.44561767578125 cy=253.8282928466797
-depth_scale=0.001
+/home/ubuntu/zeng-Visual Grasping
 ```
 
-桥接后的标准话题：
+所有源码、模型、虚拟环境、仿真实验、运行缓存和日志都保存在该目录内。本项目
+不向厂商 `robot_env` 安装依赖。
+
+## 项目定位
+
+本项目用于把 AutoLife S2 的头部 RGB-D 感知、双七轴机械臂模型和厂商控制接口
+连接成一条可审计的视觉抓取链。当前场景是“底盘保持静止，左臂抓取桌面上的
+竖直瓶子”；双臂都进入机器人模型和碰撞检查，但一次任务只允许一只主动臂运动。
+
+OpenClaw 负责理解自然语言并调用项目提供的固定工具，不负责实时伺服，也不能直接
+产生关节轨迹。视觉模型只用于语义理解；所有三维位置必须来自同帧深度相机和 TF，
+所有机械臂路径必须经过 MoveIt 与 MotionExecutor 的确定性安全检查。
+
+### 为什么采用分层架构
+
+- **同帧感知**：RGB、对齐深度、实例 mask 和内参作为一个原子 observation 保存，
+  避免机器人依据互相错帧的数据规划。
+- **目标级抓取约束**：GraspNet 提供通用候选；瓶子适配层再根据竖直圆柱几何、当前
+  TCP 可达域和自然腕姿生成侧向候选，其他类别不会自动继承瓶子规则。
+- **环境独立建模**：桌面由多帧深度点云估计，先在 PlanningScene/RViz 中检查，
+  未签字的候选配置不会成为正式执行配置。
+- **规划与执行隔离**：MoveIt 负责 IK、碰撞、路径和时间参数化；MotionExecutor
+  只接受已经验证的结果，并转换成厂商需要的 18 值轨迹。
+- **失败关闭**：数据过期、目标移动、TF 缺失、候选碰撞、IK 无解、轨迹无时间参数
+  或硬件保护异常都会中止任务，不能由 agent 自动放宽安全条件。
+
+### 数据与控制边界
+
+| 层 | 输入 | 输出 |
+| --- | --- | --- |
+| 感知 | 共享内存 RGB-D、内参 | 带 track 的三维目标与原子 observation |
+| 抓取 | 目标点云、当前 TCP | 经点云碰撞过滤的 6D 抓取候选 |
+| 规划 | 候选、关节反馈、桌面模型 | MoveIt pregrasp/grasp/lift 规划结果 |
+| 安全执行 | 已验收配置、保护心跳、确认令牌 | 锁定状态或厂商 18 值轨迹 |
+| OpenClaw | 用户自然语言 | 对固定 `graspctl.sh`/skill 工作流的调用 |
+
+## 当前能力
+
+- AutoLife S2 左、右机械臂各 7 DoF；厂商轨迹格式为腰腿 4 + 左臂 7 +
+  右臂 7，共 18 个值。
+- 实时 RGB-D、YOLO11 实例分割/跟踪、目标选择、GraspNet 6D 候选、
+  MoveIt 规划、双臂轨迹适配和可视化。
+- 当前执行语义是“一只主动臂抓取，另一只臂保持”，不是双臂协同搬运。
+- 真实运动只有 `MotionExecutor` 一个出口，且交付配置保持锁定。
+- 瓶子专用侧抓从当前 TCP 指向同帧 RGB-D 三维中心，生成水平闭合轴和自然腕姿
+  等价方向，并在进入 MoveIt 前重新执行 GraspNet 点云碰撞过滤。
+- 深度桌面建模支持五帧融合、PlanningScene 临时注入、RViz 重叠检查和原配置恢复。
+- OpenClaw agent 已包含视觉抓取、RGB-D 桌面仿真和视觉导航 skill；导航保持
+  只读/干运行，当前项目只验证机械臂抓取链。
+- 已跑通 robosuite `TwoArmLift / Panda × 2` 的 14 维双七轴无硬件仿真。
+- 当前验证结果为 `144 pytest` 与 `150 colcon tests`，均无失败。
+
+完整设计和参考项目分别见：
+
+- `docs/ARCHITECTURE_V2_ZH.md`
+- `docs/HIGH_STAR_DUAL_ARM_REFERENCES_ZH.md`
+- `docs/SITE_SCENE_AND_RESET_CALIBRATION_ZH.md`
+- `HANDOFF.md`
+
+## 最新实机干运行状态
+
+- 原先 4 个瓶子候选全部被方向过滤的问题已解决。
+- 左臂自然腕姿候选不再出现预抓取 KDL IK 无解；候选能够进入 MoveIt 响应处理。
+- 当前剩余阻塞为 `AddTimeOptimalParameterization` 无法生成受约束时间轨迹。需要先
+  核验 AutoLife S2 七轴关节速度/加速度限制，再验证 TOTG 或 Ruckig。
+- 完整 pregrasp/grasp/lift 尚未成功，因此当前结果不能用于实机执行。
+
+## V2 数据链
 
 ```text
-/head_camera/color/image_raw
-/head_camera/aligned_depth_to_color/image_raw
-/head_camera/color/camera_info
+RealSense RGB-D
+  -> YOLO11-seg + track id
+  -> 项目内原子 observation 文件（RGB/depth/mask/intrinsics）
+  -> token + size + SHA256
+  -> GraspNet + 场景碰撞过滤
+  -> 瓶子 TCP 可达域/自然腕姿侧抓候选
+  -> 对同一 track 的新帧重验证
+  -> MoveIt dry-run
+  -> MotionExecutor 安全门
+  -> AutoLife 18 关节适配器（当前锁定）
 ```
 
-2026-07-16 实机验证结果：包内 PyTorch 2.11.0+cu128 已识别 RTX 4090，
-Ultralytics 8.4.96 与 Open3D 0.19.0 可正常导入；真实头部画面中 YOLO11 分割跟踪
-识别到两只 `bottle`，跟踪 ID 为 1、2，深度约为 0.56 m、0.54 m。
+选中目标的完整观测只写到：
 
-## 编译与测试
+```text
+/home/ubuntu/zeng-Visual Grasping/runtime/selected_observations
+```
+
+ROS 服务只传递令牌、长度和摘要，接收端会校验项目根目录、文件类型、大小、
+SHA256、track、时间戳、frame、shape 和 dtype，消费后删除。这样避免把约 5 MB
+的 RGB-D 数据来回塞入 DDS 服务，也不再拼接三路相互错帧的缓存。
+
+## 构建与纯测试
 
 ```bash
-cd /home/ubuntu/ros2_ws
-source /opt/ros/jazzy/setup.bash
-colcon build --base-paths src/adaptive_object_grasping \
-  --packages-select adaptive_object_grasping --symlink-install
-source install/setup.bash
-colcon test --base-paths src/adaptive_object_grasping \
-  --packages-select adaptive_object_grasping
-colcon test-result --test-result-base build/adaptive_object_grasping --verbose
+cd "/home/ubuntu/zeng-Visual Grasping"
+bash tools/build_project.sh
+third_party/venv/bin/python tools/check_dual_arm_profile.py
 ```
 
-## 安装独立 AI 环境
+`build_project.sh` 会构建包并运行测试。源码配置修改后必须重新构建，因为节点读取
+的是 `install/adaptive_object_grasping/share/...` 下的已安装配置。
 
-不要往厂商 `robot_env` 中安装 YOLO/GraspNet，它承载机器人基础服务。执行：
+## 安全试运行
+
+以下命令不会请求机器人运动：
 
 ```bash
-bash /home/ubuntu/ros2_ws/src/adaptive_object_grasping/tools/install_ai_environment.sh
+cd "/home/ubuntu/zeng-Visual Grasping"
+tools/graspctl.sh start
+tools/graspctl.sh status
+tools/graspctl.sh list
+tools/graspctl.sh scene bottle
+tools/graspctl.sh plan bottle auto
+tools/graspctl.sh logs 200
+tools/graspctl.sh stop
 ```
 
-安装内容统一保存在功能包内部：`third_party/venv`、`models/yolo`、
-`third_party/graspnet-baseline` 和 `models/graspnet`。复制整个功能包后重新编译即可迁移；
-不同 CPU、系统或 CUDA 版本的机器人应在目标机器上重新运行安装脚本。详细目录说明见
-`docs/PORTABLE_RUNTIME.md`。
+`scene` 会先保存同一时刻的 RGB、对齐深度、实例 mask、相机内参和 TF 诊断。
+`plan` 的安全失败是正常结果：目标移动、遮挡、候选被碰撞/宽度/方向过滤，或
+重验证、IK、路径、时间参数化不合格时都会 fail closed。不要为得到“成功”而
+放宽这些阈值。
 
-然后按脚本末尾提示，在接受官方非商业研究许可证后，单独安装
-`graspnet-baseline`、编译 PointNet2 扩展并放置 checkpoint。
+`graspctl.sh stop` 只停止本项目 ROS 节点，不是机器人停止命令，也不能终止已经
+下发的厂商轨迹。现场立即停止只能使用经过验证的实体急停。
 
-## 安全启动
+## 当前执行锁
 
-完整启动：
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source /home/ubuntu/ros2_ws/install/setup.bash
-ros2 launch adaptive_object_grasping bringup.launch.py
-```
-
-### 可视化运行效果
-
-启动完整功能时会同时启动 `adaptive_grasp_visualizer`，它只订阅现有话题，不会控制机械臂。常用输出：
-
-- `/adaptive_grasp/visualization_image`：相机画面叠加 YOLO 目标框、track id、深度、选中目标、GraspNet 候选数量和运动状态。
-- `/adaptive_grasp/grasp_markers`：RViz MarkerArray，显示 GraspNet 抓取点、预抓取到抓取的连线、候选编号、左右臂颜色区分。
-
-只启动可视化节点：
-
-```bash
-ros2 launch adaptive_object_grasping visualization.launch.py
-```
-
-同时打开 RViz：
-
-```bash
-ros2 launch adaptive_object_grasping visualization.launch.py rviz:=true
-```
-
-如果只想看图像叠加，也可以用：
-
-```bash
-ros2 run rqt_image_view rqt_image_view /adaptive_grasp/visualization_image
-```
-
-默认不会控制机械臂。先检查硬件门：
-
-```bash
-ros2 service call /check_grasp_hardware std_srvs/srv/Trigger '{}'
-```
-
-只有响应中 `ready=true` 才说明相机、关节反馈、末端反馈和关键 TF 都在线。
-
-## 查看和选择物体
-
-```bash
-ros2 service call /list_grasp_objects \
-  adaptive_object_grasping/srv/ListObjects '{}'
-```
-
-按跟踪编号选择：
-
-```bash
-ros2 service call /select_grasp_object \
-  adaptive_object_grasping/srv/SelectObject \
-  "{track_id: 3, label: '', preferred_arm: auto}"
-```
-
-也可以将 `track_id` 设为 `-1`，按类别名称选择当前画面中置信度最高的目标。
-
-## 完整 dry-run
-
-```bash
-ros2 action send_goal /pick_object \
-  adaptive_object_grasping/action/PickObject \
-  "{track_id: 3, label: '', preferred_arm: auto, execute: false,
-    maximum_tracking_time: 12.0, required_stable_duration: 0.0}" --feedback
-```
-
-状态依次为：`selecting -> tracking -> stable -> estimating -> dry_run -> completed`。
-
-## 真机执行解锁顺序
-
-1. 标定并发布 `Link_Zero_Point -> rgbd_head_color_optical_frame`。
-2. 建立左右真实夹爪 TCP 帧，不直接把腕部安装链接当作指尖中心。
-3. 让关节状态和末端位姿反馈持续在线，执行 `tools/probe_hardware.sh`。
-4. 在 RViz 检查 GraspNet 候选、预抓取位姿和接近方向。
-5. 优先完成 MoveIt 2 的 URDF/SRDF、kinematics、controllers、joint limits 和
-   planning scene 配置。
-6. 首次真机只用轻质软物体、低速度、单次尝试，并在急停旁操作。
-7. 最后才修改 `config/motion.yaml`：
+交付配置为：
 
 ```yaml
-dry_run: false
-allow_hardware_execution: true
-```
-
-PBVS 真实机械臂跟随是独立高风险开关，初次抓取仍应保持：
-
-```yaml
+dry_run: true
+allow_hardware_execution: false
 enable_pbvs_hardware_follow: false
 ```
 
-## 参考实现
+即使 `/check_grasp_hardware` 返回 `ready=true`，响应仍会明确包含
+`hardware_execution_locked=true`。探针只证明反馈链当前在线，不能证明相机/TCP
+标定、环境碰撞、实体急停或现场验收已经完成。
 
-- Ultralytics tracking: https://docs.ultralytics.com/modes/track/
-- Official GraspNet baseline: https://github.com/graspnet/graspnet-baseline
-- MoveIt realtime servo: https://moveit.picknik.ai/main/doc/examples/realtime_servo/realtime_servo_tutorial.html
-- MoveIt Python planning API: https://moveit.picknik.ai/main/doc/examples/motion_planning_python_api/motion_planning_python_api_tutorial.html
+当前唯一允许接入真实执行的后端是 `moveit_py_vendor_execution`。旧
+`vendor_rrt`、`vendor_task_space` 仅保留 dry-run；PBVS 直接跟随硬件不受支持，
+开启其开关会阻止解锁。
+
+在完成 PlanningScene 环境障碍、手眼与双 TCP 标定、夹爪端点映射、实体急停试验
+和签名现场验收之前，不得修改执行锁，也不得使用 `execute`。
+
+## 模型与许可证
+
+- YOLO 默认使用 `models/yolo/yolo11n-seg.pt`，只能识别其训练类别。
+- GraspNet baseline 与权重由使用者按其学术/非商业许可独立安装；本项目只保留
+  薄适配层。
+- 高 Star 参考代码按许可证和职责边界借鉴，没有整仓复制进实机控制链。

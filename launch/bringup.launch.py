@@ -37,6 +37,10 @@ def generate_launch_description():
                 'default_planning_request_adapters/CheckStartStateBounds',
                 'default_planning_request_adapters/CheckStartStateCollision',
             ],
+            'response_adapters': [
+                'default_planning_response_adapters/AddTimeOptimalParameterization',
+                'default_planning_response_adapters/ValidateSolution',
+            ],
             'start_state_max_bounds_error': 0.1,
         },
     }

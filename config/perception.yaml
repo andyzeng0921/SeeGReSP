@@ -4,13 +4,24 @@ yolo_object_tracker:
     depth_topic: /head_camera/aligned_depth_to_color/image_raw
     camera_info_topic: /head_camera/color/camera_info
     selected_mask_topic: /selected_object_mask
-    model: models/yolo/yolo11n.pt
+    # Segmentation is required so SelectObject can return one atomic RGB-D,
+    # intrinsics and instance-mask observation to the coordinator.
+    model: models/yolo/yolo11n-seg.pt
     tracker: bytetrack.yaml
     device: auto
     image_size: 1280
     confidence_threshold: 0.35
     iou_threshold: 0.55
     maximum_inference_rate: 30.0
+    rgbd_cache_size: 16
+    # Measured capture-to-YOLO completion is about 0.20-0.40 s on robot 306.
+    maximum_observation_age_seconds: 0.50
+    # Selection waits for a newer result instead of spending the downstream
+    # storage/inference budget on an observation near the 0.50 s boundary.
+    maximum_selection_age_seconds: 0.35
+    maximum_future_skew_seconds: 0.02
+    observation_store_directory: runtime/selected_observations
+    maximum_observation_files: 32
     depth_scale: 0.001
     minimum_depth: 0.15
     maximum_depth: 2.5
