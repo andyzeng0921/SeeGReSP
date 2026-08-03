@@ -42,4 +42,80 @@
     <joint name="Joint_Right_Wrist_Upper" value="0"/>
     <joint name="Joint_Right_Wrist_Lower" value="0"/>
   </group_state>
+
+  <!-- AutoLife CAD meshes intentionally overlap inside rigid/adjacent
+       assemblies.  These pairs were observed in the live neutral state on
+       robot 306.  Keep this list local to the chassis and each gripper; no
+       arm-to-arm or arm-to-body collision is disabled. -->
+  <disable_collisions link1="Link_Ankle_to_Knee" link2="Link_Ground_Vehicle" reason="Adjacent"/>
+  <disable_collisions link1="Link_Ground_Vehicle" link2="Link_IMU" reason="Adjacent"/>
+  <disable_collisions link1="Link_Ground_Vehicle" link2="Link_Lidar_Front" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Forearm_to_Wrist_Upper" link2="Link_Right_Wrist_Upper_to_Wrist_Lower" reason="Adjacent"/>
+
+  <disable_collisions link1="Link_Camera_Gripper_Left" link2="Link_Left_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Camera_Gripper_Left" link2="Link_Left_Gripper" reason="Never"/>
+  <disable_collisions link1="Link_Camera_Gripper_Left" link2="Link_Left_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper" link2="Link_Left_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Gripper" link2="Link_Left_Gripper_Left_Finger" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper" link2="Link_Left_Gripper_Left_Inner_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper" link2="Link_Left_Gripper_Right_Finger" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper" link2="Link_Left_Gripper_Right_Inner_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper" link2="Link_Left_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Left_Finger" link2="Link_Left_Gripper_Left_Inner_Knuckle" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Gripper_Left_Finger" link2="Link_Left_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Left_Finger" link2="Link_Left_Wrist_Lower_to_Gripper" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Left_Inner_Knuckle" link2="Link_Left_Gripper_Right_Inner_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Left_Inner_Knuckle" link2="Link_Left_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Left_Inner_Knuckle" link2="Link_Left_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Gripper_Right_Finger" link2="Link_Left_Gripper_Right_Inner_Knuckle" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Gripper_Right_Finger" link2="Link_Left_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Right_Finger" link2="Link_Left_Wrist_Lower_to_Gripper" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Right_Inner_Knuckle" link2="Link_Left_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Left_Gripper_Right_Inner_Knuckle" link2="Link_Left_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Gripper_Right_Outer_Knuckle" link2="Link_Left_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+
+  <disable_collisions link1="Link_Camera_Gripper_Right" link2="Link_Right_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Gripper" link2="Link_Right_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Gripper" link2="Link_Right_Gripper_Left_Finger" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper" link2="Link_Right_Gripper_Left_Inner_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper" link2="Link_Right_Gripper_Right_Finger" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper" link2="Link_Right_Gripper_Right_Inner_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper" link2="Link_Right_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Left_Finger" link2="Link_Right_Gripper_Left_Inner_Knuckle" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Gripper_Left_Finger" link2="Link_Right_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Left_Finger" link2="Link_Right_Wrist_Lower_to_Gripper" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Left_Inner_Knuckle" link2="Link_Right_Gripper_Right_Inner_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Left_Inner_Knuckle" link2="Link_Right_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Left_Inner_Knuckle" link2="Link_Right_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Gripper_Right_Finger" link2="Link_Right_Gripper_Right_Inner_Knuckle" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Gripper_Right_Finger" link2="Link_Right_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Right_Finger" link2="Link_Right_Wrist_Lower_to_Gripper" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Right_Inner_Knuckle" link2="Link_Right_Gripper_Right_Outer_Knuckle" reason="Never"/>
+  <disable_collisions link1="Link_Right_Gripper_Right_Inner_Knuckle" link2="Link_Right_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Gripper_Right_Outer_Knuckle" link2="Link_Right_Wrist_Lower_to_Gripper" reason="Adjacent"/>
+
+  <!-- Remaining adjacent arm, torso, neck and head-sensor meshes. -->
+  <disable_collisions link1="Link_Ankle_to_Knee" link2="Link_Knee_to_Waist_Pitch" reason="Adjacent"/>
+  <disable_collisions link1="Link_Knee_to_Waist_Pitch" link2="Link_Waist_Pitch_to_Waist_Yaw" reason="Adjacent"/>
+  <disable_collisions link1="Link_Waist_Pitch_to_Waist_Yaw" link2="Link_Waist_Yaw_to_Shoulder_Inner" reason="Adjacent"/>
+  <disable_collisions link1="Link_Neck_Roll_to_Neck_Pitch" link2="Link_Waist_Yaw_to_Shoulder_Inner" reason="Adjacent"/>
+  <disable_collisions link1="Link_Neck_Pitch_to_Neck_Yaw" link2="Link_Neck_Roll_to_Neck_Pitch" reason="Adjacent"/>
+  <disable_collisions link1="Link_Neck_Pitch_to_Neck_Yaw" link2="Link_Neck_Yaw_to_Head" reason="Adjacent"/>
+  <disable_collisions link1="Link_Camera_Head_Back" link2="Link_Neck_Yaw_to_Head" reason="Adjacent"/>
+  <disable_collisions link1="Link_Camera_Head_Forehead" link2="Link_Neck_Yaw_to_Head" reason="Adjacent"/>
+  <disable_collisions link1="Link_Camera_Head_Left_Eye" link2="Link_Neck_Yaw_to_Head" reason="Adjacent"/>
+  <disable_collisions link1="Link_Camera_Head_Right_Eye" link2="Link_Neck_Yaw_to_Head" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Shoulder_Inner_to_Shoulder_Outer" link2="Link_Waist_Yaw_to_Shoulder_Inner" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Shoulder_Inner_to_Shoulder_Outer" link2="Link_Left_Shoulder_Outer_to_UpperArm" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Shoulder_Outer_to_UpperArm" link2="Link_Left_UpperArm_to_Elbow" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Elbow_to_Forearm" link2="Link_Left_UpperArm_to_Elbow" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Elbow_to_Forearm" link2="Link_Left_Forearm_to_Wrist_Upper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Forearm_to_Wrist_Upper" link2="Link_Left_Wrist_Upper_to_Wrist_Lower" reason="Adjacent"/>
+  <disable_collisions link1="Link_Left_Wrist_Lower_to_Gripper" link2="Link_Left_Wrist_Upper_to_Wrist_Lower" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Shoulder_Inner_to_Shoulder_Outer" link2="Link_Waist_Yaw_to_Shoulder_Inner" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Shoulder_Inner_to_Shoulder_Outer" link2="Link_Right_Shoulder_Outer_to_UpperArm" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Shoulder_Outer_to_UpperArm" link2="Link_Right_UpperArm_to_Elbow" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Elbow_to_Forearm" link2="Link_Right_UpperArm_to_Elbow" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Elbow_to_Forearm" link2="Link_Right_Forearm_to_Wrist_Upper" reason="Adjacent"/>
+  <disable_collisions link1="Link_Right_Wrist_Lower_to_Gripper" link2="Link_Right_Wrist_Upper_to_Wrist_Lower" reason="Adjacent"/>
 </robot>

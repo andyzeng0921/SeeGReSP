@@ -25,13 +25,16 @@ from adaptive_object_grasping_nodes.dual_arm_core import select_arm
 from adaptive_object_grasping_nodes.graspnet_core import (
     apply_grasp_depth_offset,
     collision_scene_cloud,
+    horizontal_grasp_orientation_variants,
     is_horizontal_grasp,
     matrix_to_quaternion,
     parse_grasp_array,
     sample_point_cloud,
     target_point_cloud,
     transform_grasp_pose,
+    wrist_aligned_side_grasp_rows,
 )
+from adaptive_object_grasping_nodes.pbvs_core import quaternion_matrix
 from adaptive_object_grasping_nodes.observation_store_core import (
     load_observation,
     resolve_store_directory,
@@ -115,6 +118,7 @@ class OfficialGraspNetBackend:
         voxel_size,
         maximum,
         approach_distance,
+        wrist_aligned_context=None,
     ):
         started = time.perf_counter()
         tensor = self._torch.from_numpy(sampled_points[np.newaxis].astype(np.float32)).to(
@@ -129,6 +133,27 @@ class OfficialGraspNetBackend:
         group.nms()
         group.sort_by_score()
         group = group[: max(1, int(maximum))]
+        wrist_aligned_count = 0
+        if wrist_aligned_context:
+            aligned_rows = wrist_aligned_side_grasp_rows(
+                group.grasp_group_array,
+                wrist_aligned_context['tcp_position'],
+                wrist_aligned_context['tcp_rotation'],
+                wrist_aligned_context['vertical_direction'],
+                approach_axis=wrist_aligned_context['approach_axis'],
+                closing_axis=wrist_aligned_context['closing_axis'],
+                maximum_approach_tilt_degrees=wrist_aligned_context[
+                    'maximum_approach_tilt_degrees'
+                ],
+                grasp_center=wrist_aligned_context['grasp_center'],
+            )
+            wrist_aligned_count = len(aligned_rows)
+            if wrist_aligned_count:
+                combined = np.vstack((
+                    aligned_rows,
+                    group.grasp_group_array,
+                ))
+                group = self._grasp_group_type(combined)
         preparation_finished = time.perf_counter()
         if collision_threshold > 0.0:
             from collision_detector import ModelFreeCollisionDetector
@@ -141,13 +166,15 @@ class OfficialGraspNetBackend:
             )
             group = group[~collisions]
         collision_finished = time.perf_counter()
-        group.nms()
-        group.sort_by_score()
+        if not wrist_aligned_count:
+            group.nms()
+            group.sort_by_score()
         self.last_timings = {
             'network_seconds': network_finished - started,
             'preparation_seconds': preparation_finished - network_finished,
             'collision_seconds': collision_finished - preparation_finished,
             'finalize_seconds': time.perf_counter() - collision_finished,
+            'wrist_aligned_rows': wrist_aligned_count,
         }
         return np.asarray(group.grasp_group_array[: int(maximum)])
 
@@ -181,6 +208,19 @@ class GraspNetServer(Node):
         self.declare_parameter('vertical_axis', 2)
         self.declare_parameter('maximum_approach_tilt_degrees', 15.0)
         self.declare_parameter('maximum_closing_tilt_degrees', 15.0)
+        self.declare_parameter('bottle_side_grasp_enabled', True)
+        self.declare_parameter(
+            'bottle_side_grasp_labels', ['bottle']
+        )
+        self.declare_parameter(
+            'bottle_side_roll_degrees', [90.0, -90.0, 180.0]
+        )
+        self.declare_parameter('bottle_wrist_aligned_enabled', True)
+        self.declare_parameter(
+            'bottle_wrist_aligned_use_target_center', True
+        )
+        self.declare_parameter('left_tcp_frame', 'left_grasp_tcp')
+        self.declare_parameter('right_tcp_frame', 'right_grasp_tcp')
         self.declare_parameter('apply_grasp_depth', False)
         self.declare_parameter('grasp_depth_scale', 1.0)
         self.declare_parameter('maximum_grasp_depth_offset', 0.05)
@@ -427,6 +467,9 @@ class GraspNetServer(Node):
                 rclpy.time.Time.from_msg(request.target.header.stamp),
                 timeout=Duration(seconds=float(self.get_parameter('tf_timeout').value)),
             )
+            wrist_aligned_context = self._wrist_aligned_context(
+                request, transform
+            )
             with self._inference_lock:
                 backend = self._load_backend()
                 rows = np.empty((0, 17), dtype=np.float32)
@@ -441,6 +484,7 @@ class GraspNetServer(Node):
                         float(self.get_parameter('collision_voxel_size').value),
                         int(self.get_parameter('maximum_raw_candidates').value),
                         float(self.get_parameter('pregrasp_offset').value),
+                        wrist_aligned_context=wrist_aligned_context,
                     )
                     if len(rows):
                         break
@@ -458,6 +502,8 @@ class GraspNetServer(Node):
                 f'attempts={attempts_used}, '
                 f'target_points={len(points)}, '
                 f'scene_points={raw_scene_point_count}->{len(scene_points)}'
+                f', wrist_aligned_rows='
+                f'{timings.get("wrist_aligned_rows", 0)}'
             )
             post_inference_age_error = freshness_error(
                 self.get_clock().now().nanoseconds,
@@ -487,6 +533,11 @@ class GraspNetServer(Node):
             return response
         response.candidates = candidates
         response.success = bool(candidates)
+        candidate_scores = [float(item.score) for item in candidates]
+        score_range = (
+            f'[{min(candidate_scores):.3f},{max(candidate_scores):.3f}]'
+            if candidate_scores else '[]'
+        )
         response.message = (
             f'generated {len(candidates)} grasp candidates from {len(rows)} raw rows '
             f'(minimum_score={float(self.get_parameter("minimum_grasp_score").value):.3f}, '
@@ -496,8 +547,12 @@ class GraspNetServer(Node):
             f'{bool(self.get_parameter("horizontal_grasp_filter_enabled").value)}, '
             f'rejected_score={filter_stats["score"]}, '
             f'rejected_width={filter_stats["width"]}, '
-            f'rejected_orientation={filter_stats["orientation"]})'
+            f'rejected_orientation={filter_stats["orientation"]}, '
+            f'bottle_rows_recovered={filter_stats["bottle_rows_recovered"]}, '
+            f'bottle_equivalents={filter_stats["bottle_equivalents"]}, '
+            f'score_range={score_range})'
         )
+        self.get_logger().info(response.message)
         self._publish_candidates(request.target, candidates)
         return response
 
@@ -521,6 +576,19 @@ class GraspNetServer(Node):
         maximum_closing_tilt = float(
             self.get_parameter('maximum_closing_tilt_degrees').value
         )
+        bottle_side_enabled = bool(
+            self.get_parameter('bottle_side_grasp_enabled').value
+        )
+        bottle_labels = {
+            str(value).strip().casefold()
+            for value in self.get_parameter('bottle_side_grasp_labels').value
+            if str(value).strip()
+        }
+        bottle_roll_degrees = [
+            float(value)
+            for value in self.get_parameter('bottle_side_roll_degrees').value
+        ]
+        is_bottle = request.target.label.strip().casefold() in bottle_labels
         offset = float(self.get_parameter('pregrasp_offset').value)
         apply_depth = bool(self.get_parameter('apply_grasp_depth').value)
         depth_scale = float(self.get_parameter('grasp_depth_scale').value)
@@ -530,7 +598,13 @@ class GraspNetServer(Node):
         base_header = copy.deepcopy(request.target.header)
         base_header.frame_id = str(self.get_parameter('base_frame').value)
         candidates = []
-        filter_stats = {'score': 0, 'width': 0, 'orientation': 0}
+        filter_stats = {
+            'score': 0,
+            'width': 0,
+            'orientation': 0,
+            'bottle_rows_recovered': 0,
+            'bottle_equivalents': 0,
+        }
         for row in rows:
             grasp = parse_grasp_array(row)
             if grasp['score'] < minimum_score:
@@ -542,6 +616,10 @@ class GraspNetServer(Node):
             position, grasp_rotation = transform_grasp_pose(
                 grasp['translation'], grasp['rotation'], tf_translation, tf_quaternion
             )
+            orientation_variants = [{
+                'rotation': grasp_rotation,
+                'roll_degrees': 0.0,
+            }]
             if horizontal_filter:
                 accepted, _, _ = is_horizontal_grasp(
                     grasp_rotation,
@@ -551,48 +629,175 @@ class GraspNetServer(Node):
                     maximum_approach_tilt_degrees=maximum_approach_tilt,
                     maximum_closing_tilt_degrees=maximum_closing_tilt,
                 )
-                if not accepted:
+                if accepted and bottle_side_enabled and is_bottle:
+                    orientation_variants = horizontal_grasp_orientation_variants(
+                        grasp_rotation,
+                        approach_axis=axis,
+                        closing_axis=closing_axis,
+                        vertical_axis=vertical_axis,
+                        maximum_approach_tilt_degrees=maximum_approach_tilt,
+                        maximum_closing_tilt_degrees=maximum_closing_tilt,
+                        roll_degrees=(0.0, *bottle_roll_degrees),
+                    )
+                    filter_stats['bottle_equivalents'] += max(
+                        0, len(orientation_variants) - 1
+                    )
+                elif accepted:
+                    orientation_variants = horizontal_grasp_orientation_variants(
+                        grasp_rotation,
+                        approach_axis=axis,
+                        closing_axis=closing_axis,
+                        vertical_axis=vertical_axis,
+                        maximum_approach_tilt_degrees=maximum_approach_tilt,
+                        maximum_closing_tilt_degrees=maximum_closing_tilt,
+                        roll_degrees=(0.0,),
+                    )
+                elif bottle_side_enabled and is_bottle:
+                    orientation_variants = horizontal_grasp_orientation_variants(
+                        grasp_rotation,
+                        approach_axis=axis,
+                        closing_axis=closing_axis,
+                        vertical_axis=vertical_axis,
+                        maximum_approach_tilt_degrees=maximum_approach_tilt,
+                        maximum_closing_tilt_degrees=maximum_closing_tilt,
+                        roll_degrees=bottle_roll_degrees,
+                    )
+                    if orientation_variants:
+                        filter_stats['bottle_rows_recovered'] += 1
+                        filter_stats['bottle_equivalents'] += len(
+                            orientation_variants
+                        )
+                if not orientation_variants:
                     filter_stats['orientation'] += 1
                     continue
-            approach = grasp_rotation[:, axis]
-            grasp_position = position
-            if apply_depth:
-                grasp_position, _ = apply_grasp_depth_offset(
-                    position,
-                    grasp_rotation,
-                    axis,
-                    grasp['depth'],
-                    depth_scale,
-                    maximum_depth_offset,
+            for variant in orientation_variants:
+                candidate_rotation = variant['rotation']
+                approach = candidate_rotation[:, axis]
+                grasp_position = position
+                if apply_depth:
+                    grasp_position, _ = apply_grasp_depth_offset(
+                        position,
+                        candidate_rotation,
+                        axis,
+                        grasp['depth'],
+                        depth_scale,
+                        maximum_depth_offset,
+                    )
+                pregrasp = grasp_position - approach * offset
+                arm = self._select_arm(request.preferred_arm, grasp_position[1])
+                message = GraspCandidate()
+                message.header = copy.deepcopy(base_header)
+                message.track_id = request.target.track_id
+                message.label = request.target.label
+                message.arm = arm
+                message.score = grasp['score']
+                message.required_width = grasp['width']
+                message.grasp_depth = grasp['depth']
+                message.grasp_height = grasp['height']
+                quaternion = matrix_to_quaternion(candidate_rotation)
+                self._fill_pose(
+                    message.grasp_pose,
+                    grasp_position,
+                    quaternion,
+                    base_header,
                 )
-            pregrasp = grasp_position - approach * offset
-            arm = self._select_arm(request.preferred_arm, grasp_position[1])
-            message = GraspCandidate()
-            message.header = copy.deepcopy(base_header)
-            message.track_id = request.target.track_id
-            message.label = request.target.label
-            message.arm = arm
-            message.score = grasp['score']
-            message.required_width = grasp['width']
-            message.grasp_depth = grasp['depth']
-            message.grasp_height = grasp['height']
-            quaternion = matrix_to_quaternion(grasp_rotation)
-            self._fill_pose(
-                message.grasp_pose,
-                grasp_position,
-                quaternion,
-                base_header,
-            )
-            self._fill_pose(
-                message.pregrasp_pose,
-                pregrasp,
-                quaternion,
-                base_header,
-            )
-            candidates.append(message)
+                self._fill_pose(
+                    message.pregrasp_pose,
+                    pregrasp,
+                    quaternion,
+                    base_header,
+                )
+                candidates.append(message)
+                if len(candidates) >= maximum_candidates:
+                    break
             if len(candidates) >= maximum_candidates:
                 break
         return candidates, filter_stats
+
+    def _wrist_aligned_context(self, request, camera_to_base):
+        if not bool(
+            self.get_parameter('bottle_wrist_aligned_enabled').value
+        ):
+            return None
+        bottle_labels = {
+            str(value).strip().casefold()
+            for value in self.get_parameter('bottle_side_grasp_labels').value
+            if str(value).strip()
+        }
+        if request.target.label.strip().casefold() not in bottle_labels:
+            return None
+        translation = camera_to_base.transform.translation
+        quaternion = camera_to_base.transform.rotation
+        camera_to_base_translation = np.array([
+            translation.x, translation.y, translation.z
+        ], dtype=np.float64)
+        camera_to_base_rotation = quaternion_matrix([
+            quaternion.x, quaternion.y, quaternion.z, quaternion.w
+        ])
+        target_base = (
+            camera_to_base_rotation
+            @ np.array([
+                request.target.position_camera.x,
+                request.target.position_camera.y,
+                request.target.position_camera.z,
+            ], dtype=np.float64)
+            + camera_to_base_translation
+        )
+        arm = self._select_arm(request.preferred_arm, target_base[1])
+        tcp_frame = str(
+            self.get_parameter(
+                'left_tcp_frame' if arm == 'left' else 'right_tcp_frame'
+            ).value
+        )
+        camera_from_tcp = self._tf_buffer.lookup_transform(
+            request.target.header.frame_id,
+            tcp_frame,
+            rclpy.time.Time.from_msg(request.target.header.stamp),
+            timeout=Duration(
+                seconds=float(self.get_parameter('tf_timeout').value)
+            ),
+        )
+        tcp_translation = camera_from_tcp.transform.translation
+        tcp_quaternion = camera_from_tcp.transform.rotation
+        vertical_camera = camera_to_base_rotation.T @ np.array(
+            [0.0, 0.0, 1.0], dtype=np.float64
+        )
+        return {
+            'tcp_position': np.array([
+                tcp_translation.x, tcp_translation.y, tcp_translation.z
+            ], dtype=np.float64),
+            'tcp_rotation': quaternion_matrix([
+                tcp_quaternion.x,
+                tcp_quaternion.y,
+                tcp_quaternion.z,
+                tcp_quaternion.w,
+            ]),
+            'vertical_direction': vertical_camera,
+            'grasp_center': (
+                np.array([
+                    request.target.position_camera.x,
+                    request.target.position_camera.y,
+                    request.target.position_camera.z,
+                ], dtype=np.float64)
+                if bool(
+                    self.get_parameter(
+                        'bottle_wrist_aligned_use_target_center'
+                    ).value
+                )
+                else None
+            ),
+            'approach_axis': int(
+                self.get_parameter('approach_axis').value
+            ),
+            'closing_axis': int(
+                self.get_parameter('closing_axis').value
+            ),
+            'maximum_approach_tilt_degrees': float(
+                self.get_parameter(
+                    'maximum_approach_tilt_degrees'
+                ).value
+            ),
+        }
 
     def _select_arm(self, requested_arm, base_y):
         deadband = abs(float(self.get_parameter('auto_arm_deadband_y').value))

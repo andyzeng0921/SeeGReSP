@@ -7,7 +7,8 @@ YOLO11 实例分割与跟踪、GraspNet 6D 抓取候选、同目标新帧复核�
 [详细中文说明](README_ZH.md) ·
 [V2 架构](docs/ARCHITECTURE_V2_ZH.md) ·
 [部署交接](HANDOFF.md) ·
-[高 Star 参考](docs/HIGH_STAR_DUAL_ARM_REFERENCES_ZH.md)
+[高 Star 参考](docs/HIGH_STAR_DUAL_ARM_REFERENCES_ZH.md) ·
+[现场标定](docs/SITE_SCENE_AND_RESET_CALIBRATION_ZH.md)
 
 > [!WARNING]
 > 当前仓库默认且必须保持 `dry_run`。现场 PlanningScene、相机与双 TCP 标定、
@@ -21,9 +22,21 @@ YOLO11 实例分割与跟踪、GraspNet 6D 抓取候选、同目标新帧复核�
 - 当前任务语义：选择一只主动臂抓取，另一只臂保持；不是实机双臂协同搬运。
 - 唯一硬件规划入口：`moveit_py_vendor_execution`。
 - PBVS 直接硬件跟随不受支持；厂商 RRT/末端位姿后端仅用于 dry-run。
-- 干净源码构建验证：`72 tests, 0 errors, 0 failures, 0 skipped`。
+- 瓶子侧抓会从当前 TCP 指向同帧 RGB-D 三维中心，构造水平闭合轴并选择自然腕姿；
+  候选仍会经过 GraspNet 点云碰撞过滤和 MoveIt 碰撞/IK 检查。
+- 深度桌面建模支持多帧融合、PlanningScene 临时注入、RViz 重叠检查与自动配置恢复。
+- OpenClaw 提供 `visual-grasping`、`rgbd-tabletop-simulation` 和只读/干运行的
+  `visual-navigation` skill；自然语言入口不进入实时控制环。
+- 当前源码验证：`144 pytest`；安装态验证：`150 colcon tests`，均为零失败。
 - robosuite 双 Panda 验证：两路 7 轴状态、14 维 action、10 个有限物理步，
   `hardware_connected=false`。
+
+### 当前实机干运行结论
+
+- 瓶子方向过滤和左臂预抓取 KDL IK 已通过自然腕姿/TCP 可达域候选解决。
+- MoveIt 当前停在 `AddTimeOptimalParameterization`：AutoLife S2 七轴速度/加速度
+  限制仍需现场核验，完整的 pregrasp/grasp/lift 干运行尚未通过。
+- 这不是可执行验收结果。禁止删除时间戳校验、伪造动力学限制或解除硬件锁。
 
 ## V2 数据链
 
@@ -33,6 +46,7 @@ RealSense RGB-D
   -> 原子 observation（RGB/depth/mask/intrinsics）
   -> opaque token + payload size + SHA-256
   -> GraspNet + 目标邻域点云碰撞过滤
+  -> 瓶子 TCP 可达域/自然腕姿侧抓候选
   -> 同一 track 的新帧目标复核
   -> MoveIt dry-run
   -> MotionExecutor 安全边界
@@ -111,13 +125,16 @@ cp config/site_acceptance.example.yaml config/site_acceptance.yaml
 ./tools/graspctl.sh start
 ./tools/graspctl.sh status
 ./tools/graspctl.sh list
+./tools/graspctl.sh scene bottle
 ./tools/graspctl.sh plan bottle auto
 ./tools/graspctl.sh logs 200
 ./tools/graspctl.sh stop
 ```
 
-`plan` 的安全失败是正常结果：目标移动、遮挡、深度无效、候选碰撞、夹爪宽度或
-方向不合格、重验证失败时都会 fail closed。不要为获得成功结果而放宽阈值。
+`scene` 会先固化一份同帧 RGB、对齐深度、实例 mask、内参和 TF 诊断；规划所用
+目标仍会在 action 内重新取得并复核。`plan` 的安全失败是正常结果：目标移动、
+遮挡、深度无效、候选碰撞、夹爪宽度/方向、IK、路径或时间参数化不合格时都会
+fail closed。不要为获得成功结果而放宽阈值。
 
 `graspctl.sh stop` 只停止本项目 ROS 进程，不是机器人停止命令。
 

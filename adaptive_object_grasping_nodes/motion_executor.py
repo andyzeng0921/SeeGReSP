@@ -1,6 +1,7 @@
 import copy
 import json
 import math
+import numpy as np
 import threading
 import time
 from pathlib import Path
@@ -9,13 +10,13 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
-from autolife_robot_srvs.srv import SetString
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from adaptive_object_grasping.srv import ExecuteCandidate
 from adaptive_object_grasping_nodes.dual_arm_core import (
@@ -40,6 +41,11 @@ from adaptive_object_grasping_nodes.motion_core import (
     width_to_gripper_position,
 )
 from adaptive_object_grasping_nodes.robot_geometry_core import tcp_target_to_eef
+from adaptive_object_grasping_nodes.environment_scene_core import validate_environment_scene
+from adaptive_object_grasping_nodes.visible_reset_core import (
+    ARM_JOINTS,
+    validate_visible_reset_pose,
+)
 from adaptive_object_grasping_nodes.robot_geometry_core import parse_robot_joint_feedback
 from adaptive_object_grasping_nodes.safety_core import (
     HARDWARE_EXECUTION_CONFIRMATION,
@@ -61,6 +67,9 @@ class MotionExecutor(Node):
         self.declare_parameter('hardware_status_maximum_age', 2.0)
         self.declare_parameter('require_site_acceptance', True)
         self.declare_parameter('site_acceptance_path', 'config/site_acceptance.yaml')
+        self.declare_parameter('require_environment_scene', True)
+        self.declare_parameter('environment_scene_path', 'config/environment_scene.yaml')
+        self.declare_parameter('visible_reset_pose_path', 'config/visible_reset_pose.yaml')
         self.declare_parameter(
             'hardware_execution_confirmation', HARDWARE_EXECUTION_CONFIRMATION
         )
@@ -72,6 +81,7 @@ class MotionExecutor(Node):
         self.declare_parameter('motion_completion_margin', 3.0)
         self.declare_parameter('motion_settle_time', 0.30)
         self.declare_parameter('maximum_candidate_age', 1.0)
+        self.declare_parameter('dry_run_maximum_candidate_age', 5.0)
         self.declare_parameter('candidate_future_tolerance', 0.05)
         self.declare_parameter('position_tolerance', 0.025)
         self.declare_parameter('orientation_tolerance', 0.15)
@@ -130,6 +140,7 @@ class MotionExecutor(Node):
         self._hardware_status_time = 0.0
         self._pbvs_unsupported_reported = False
         self._moveit = None
+        self._environment_scene_loaded = False
         self._moveit_components = {}
         self._last_joint_feedback_time = 0.0
         self._joint_target_error_deg = None
@@ -149,6 +160,15 @@ class MotionExecutor(Node):
         )
         self._site_acceptance_path = str(
             self.get_parameter('site_acceptance_path').value
+        )
+        self._require_environment_scene = bool(
+            self.get_parameter('require_environment_scene').value
+        )
+        self._environment_scene_path = str(
+            self.get_parameter('environment_scene_path').value
+        )
+        self._visible_reset_pose_path = str(
+            self.get_parameter('visible_reset_pose_path').value
         )
         self._hardware_execution_confirmation = str(
             self.get_parameter('hardware_execution_confirmation').value
@@ -171,6 +191,19 @@ class MotionExecutor(Node):
         self._maximum_candidate_age = float(
             self.get_parameter('maximum_candidate_age').value
         )
+        self._dry_run_maximum_candidate_age = float(
+            self.get_parameter('dry_run_maximum_candidate_age').value
+        )
+        if (
+            not math.isfinite(self._maximum_candidate_age)
+            or self._maximum_candidate_age <= 0.0
+            or not math.isfinite(self._dry_run_maximum_candidate_age)
+            or self._dry_run_maximum_candidate_age < self._maximum_candidate_age
+        ):
+            raise ValueError(
+                'candidate ages must be finite and positive, and the dry-run '
+                'age must not be stricter than the execution age'
+            )
         self._candidate_future_tolerance = float(
             self.get_parameter('candidate_future_tolerance').value
         )
@@ -236,15 +269,22 @@ class MotionExecutor(Node):
         self._target_joints_pub = self.create_publisher(
             String, f'/topic_arm_whole_body_target_joints_position_{suffix}', 10
         )
-        self._ik_client = self.create_client(
-            SetString, f'/service_arm_robot_inverse_kinematics_{suffix}'
-        )
-        self._fk_client = self.create_client(
-            SetString, f'/service_arm_robot_forward_kinematics_{suffix}'
-        )
-        self._rrt_client = self.create_client(
-            SetString, f'/service_arm_whole_body_joint_motion_planning_{suffix}'
-        )
+        self._ik_client = None
+        self._fk_client = None
+        self._rrt_client = None
+        if self._planning_backend == 'vendor_rrt':
+            # Keep the vendor conda-generated service ABI out of the MoveIt
+            # process unless this diagnostic-only backend is explicitly used.
+            from autolife_robot_srvs.srv import SetString
+            self._ik_client = self.create_client(
+                SetString, f'/service_arm_robot_inverse_kinematics_{suffix}'
+            )
+            self._fk_client = self.create_client(
+                SetString, f'/service_arm_robot_forward_kinematics_{suffix}'
+            )
+            self._rrt_client = self.create_client(
+                SetString, f'/service_arm_whole_body_joint_motion_planning_{suffix}'
+            )
         self._status_pub = self.create_publisher(String, 'motion_execution_status', 10)
         self._joint_state_pub = self.create_publisher(JointState, 'joint_states', 10)
         target_state_qos = QoSProfile(
@@ -281,6 +321,12 @@ class MotionExecutor(Node):
             ExecuteCandidate,
             'execute_grasp_candidate',
             self._execute_service,
+            callback_group=callback_group,
+        )
+        self.create_service(
+            Trigger,
+            'plan_visible_reset',
+            self._plan_visible_reset_service,
             callback_group=callback_group,
         )
         self.create_timer(0.5, self._republish_target_joint_state)
@@ -442,7 +488,7 @@ class MotionExecutor(Node):
 
     def _execute_service_locked(self, request, response):
         candidate = request.candidate
-        error = self._validate_candidate(candidate)
+        error = self._validate_candidate(candidate, execute=bool(request.execute))
         if error:
             response.message = error
             return response
@@ -683,7 +729,7 @@ class MotionExecutor(Node):
                 'use the physical emergency stop if the robot is still moving'
             )
 
-    def _validate_candidate(self, candidate):
+    def _validate_candidate(self, candidate, execute=False):
         if candidate.arm not in ('left', 'right'):
             return 'candidate arm must be left or right'
         if (
@@ -717,7 +763,11 @@ class MotionExecutor(Node):
         age_error = validate_measurement_age(
             now_seconds,
             stamp_seconds,
-            self._maximum_candidate_age,
+            (
+                self._maximum_candidate_age
+                if execute
+                else self._dry_run_maximum_candidate_age
+            ),
             self._candidate_future_tolerance,
         )
         if age_error:
@@ -1106,6 +1156,8 @@ class MotionExecutor(Node):
 
     def _ensure_moveit(self):
         if self._moveit is not None:
+            if not self._environment_scene_loaded:
+                self._load_environment_scene()
             return
         try:
             from moveit.planning import MoveItPy
@@ -1113,15 +1165,23 @@ class MotionExecutor(Node):
             raise RuntimeError(f'moveit_py import failed in motion executor environment: {exc}') from exc
         moveit_dir = Path(get_package_share_directory('adaptive_object_grasping')) / 'config' / 'moveit'
         config_dict = yaml.safe_load((moveit_dir / 'ompl_planning.yaml').read_text())
+        robot_description = (moveit_dir / 'robot_v2_2.urdf').read_text().replace(
+            '../meshes/robot_v2_2/',
+            'package://adaptive_object_grasping/meshes/robot_v2_2/',
+        )
         config_dict.update({
-            'robot_description': (moveit_dir / 'robot_v2_2.urdf').read_text(),
+            # MoveItPy does not resolve paths relative to the URDF file.  Keep
+            # collision meshes package-addressable, exactly as bringup.launch.py
+            # does for robot_state_publisher.
+            'robot_description': robot_description,
             'robot_description_semantic': (moveit_dir / 'autolife_s2.srdf').read_text(),
             'robot_description_kinematics': yaml.safe_load((moveit_dir / 'kinematics.yaml').read_text()),
         })
-        # The robot does not expose a FollowJointTrajectory action. MoveIt is
-        # planning-only here; trajectories are converted below to the vendor's
-        # 18-value JSON trajectory topic. Still load an explicit empty controller
-        # manager so MoveItCpp does not attempt an unconfigured execution backend.
+        # MoveItPy requires a loadable controller-manager plugin even though
+        # execution is disabled.  Robot 306 loads the official plugin from the
+        # project-local ROS overlay prepared by install_moveit_overlay.sh.
+        # The dummy action is never called; trajectories are converted by the
+        # separately gated vendor adapter below.
         config_dict.update(
             yaml.safe_load((moveit_dir / 'moveit_controllers.yaml').read_text())
         )
@@ -1132,11 +1192,181 @@ class MotionExecutor(Node):
         for arm in ('left', 'right'):
             group = self._moveit_left_group if arm == 'left' else self._moveit_right_group
             self._moveit_components[arm] = self._moveit.get_planning_component(group)
+        self._load_environment_scene()
+
+    def _plan_visible_reset_service(self, _request, response):
+        """Plan to the site-captured pose without exposing an execution path."""
+
+        if not self._execution_lock.acquire(blocking=False):
+            response.message = 'motion executor is busy'
+            return response
+        try:
+            self._ensure_moveit()
+            path = self._package_config_path(self._visible_reset_pose_path)
+            data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+            targets_deg = validate_visible_reset_pose(data, require_verified=True)
+            monitor = self._moveit.get_planning_scene_monitor()
+            with monitor.read_only() as scene:
+                target = copy.copy(scene.current_state)
+            for arm, group in (('left', self._moveit_left_group), ('right', self._moveit_right_group)):
+                target.set_joint_group_active_positions(
+                    group,
+                    np.radians(np.asarray(targets_deg[arm], dtype=np.float64)),
+                )
+            target.update()
+            with monitor.read_only() as scene:
+                if scene.is_state_colliding(target, 'Both_Arms', False):
+                    raise RuntimeError('visible reset target collides with robot or environment')
+            # The vendor adapter cannot execute an atomic bimanual trajectory.
+            # Validate the same sequential contract used by real execution:
+            # left arm first, then right arm from the left-at-target state.
+            with monitor.read_only() as scene:
+                current = copy.copy(scene.current_state)
+            left_goal = copy.copy(current)
+            left_goal.set_joint_group_active_positions(
+                self._moveit_left_group,
+                np.radians(np.asarray(targets_deg['left'], dtype=np.float64)),
+            )
+            left_goal.update()
+            left_result = self._plan_reset_arm(
+                self._moveit_components['left'], current, left_goal, 'left'
+            )
+            right_result = self._plan_reset_arm(
+                self._moveit_components['right'], left_goal, target, 'right'
+            )
+            left_trajectory = left_result.trajectory.get_robot_trajectory_msg().joint_trajectory
+            right_trajectory = right_result.trajectory.get_robot_trajectory_msg().joint_trajectory
+            self._publish_target_joint_state({
+                **dict(zip(ARM_JOINTS['left'], np.radians(targets_deg['left']))),
+                **dict(zip(ARM_JOINTS['right'], np.radians(targets_deg['right']))),
+            })
+            response.success = True
+            response.message = (
+                'visible reset dry-run planned sequentially with '
+                f'{len(left_trajectory.points)} left-arm and '
+                f'{len(right_trajectory.points)} right-arm points; '
+                'target ghost published; no hardware command was sent'
+            )
+        except Exception as exc:
+            response.message = f'visible reset planning rejected: {exc}'
+        finally:
+            self._execution_lock.release()
+        return response
+
+    def _plan_reset_arm(self, component, start_state, goal_state, arm):
+        component.set_start_state(robot_state=start_state)
+        component.set_goal_state(robot_state=goal_state)
+        from moveit.planning import PlanRequestParameters
+        params = PlanRequestParameters(self._moveit, 'plan_request_params')
+        params.planning_pipeline = 'ompl'
+        params.planner_id = 'RRTConnectkConfigDefault'
+        params.planning_time = self._moveit_planning_time
+        params.planning_attempts = self._moveit_planning_attempts
+        params.max_velocity_scaling_factor = self._moveit_max_velocity_scaling
+        params.max_acceleration_scaling_factor = self._moveit_max_acceleration_scaling
+        result = component.plan(single_plan_parameters=params)
+        if not result:
+            raise RuntimeError(f'MoveIt could not plan the {arm}-arm visible-reset stage')
+        trajectory = result.trajectory.get_robot_trajectory_msg().joint_trajectory
+        if not trajectory.points:
+            raise RuntimeError(f'MoveIt returned an empty {arm}-arm reset trajectory')
+        return result
+
+    def _package_config_path(self, configured):
+        path = Path(configured).expanduser()
+        if path.is_absolute():
+            return path
+        if '..' in path.parts:
+            raise RuntimeError('relative config path escapes the installed package share')
+        package_share = Path(get_package_share_directory('adaptive_object_grasping')).resolve()
+        # With colcon --symlink-install, config is intentionally a symlink to
+        # the source tree. Resolving the final path would reject that supported
+        # layout as an escape. The lexical traversal check above still prevents
+        # a parameter from walking outside the package share.
+        return package_share / path
+
+    def _load_environment_scene(self):
+        if not self._require_environment_scene:
+            self._environment_scene_loaded = True
+            return
+        try:
+            from moveit_msgs.msg import CollisionObject
+            from shape_msgs.msg import SolidPrimitive
+            from geometry_msgs.msg import Pose
+
+            path = self._package_config_path(self._environment_scene_path)
+            data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+            objects = validate_environment_scene(data, require_verified=True)
+            monitor = self._moveit.get_planning_scene_monitor()
+            with monitor.read_write() as scene:
+                for item in objects:
+                    collision = CollisionObject()
+                    collision.header.frame_id = item['frame_id']
+                    collision.id = item['id']
+                    collision.operation = CollisionObject.ADD
+                    primitive = SolidPrimitive()
+                    primitive.type = SolidPrimitive.BOX
+                    primitive.dimensions = item['dimensions_m']
+                    pose = Pose()
+                    pose.position.x, pose.position.y, pose.position.z = item['position_m']
+                    (
+                        pose.orientation.x,
+                        pose.orientation.y,
+                        pose.orientation.z,
+                        pose.orientation.w,
+                    ) = item['quaternion_xyzw']
+                    collision.primitives = [primitive]
+                    collision.primitive_poses = [pose]
+                    scene.apply_collision_object(collision)
+                if scene.is_state_colliding(scene.current_state, 'Both_Arms', False):
+                    raise RuntimeError(
+                        'current robot state collides with the calibrated environment scene'
+                    )
+            self._publish_status('environment_scene_loaded', f'{len(objects)} objects from {path}')
+            self._environment_scene_loaded = True
+        except Exception as exc:
+            self._environment_scene_loaded = False
+            raise RuntimeError(f'calibrated environment scene rejected: {exc}') from exc
 
     def _plan_moveit(self, component, pose, tip, stage):
         self._publish_status(f'planning_{stage}', tip)
         component.set_start_state_to_current_state()
-        component.set_goal_state(pose_stamped_msg=pose, pose_link=tip)
+        group = (
+            self._moveit_left_group
+            if tip == self._moveit_left_tip
+            else self._moveit_right_group
+        )
+        # Fail with an actionable reason before spending the full OMPL budget.
+        # get_start_state() returns a detached RobotState; set_from_ik mutates
+        # only this diagnostic copy and never commands the robot.
+        with self._moveit.get_planning_scene_monitor().read_only() as scene:
+            ik_probe = copy.copy(scene.current_state)
+        current_pose = ik_probe.get_pose(tip)
+        current_pose_probe = copy.copy(ik_probe)
+        if not current_pose_probe.set_from_ik(
+            group,
+            current_pose,
+            tip,
+            min(0.5, self._moveit_planning_time),
+        ):
+            raise RuntimeError(
+                f'MoveIt KDL IK self-check failed for the current {group} '
+                f'{tip} pose; verify the URDF chain and joint feedback mapping'
+            )
+        ik_solution = self._solve_moveit_ik(ik_probe, group, pose.pose, tip)
+        if ik_solution is None:
+            position = pose.pose.position
+            orientation = pose.pose.orientation
+            raise RuntimeError(
+                f'MoveIt KDL IK found no {group} solution for {stage} '
+                f'(tip={tip}, frame={pose.header.frame_id}, '
+                f'position=[{position.x:.4f},{position.y:.4f},{position.z:.4f}], '
+                f'quaternion=[{orientation.x:.4f},{orientation.y:.4f},'
+                f'{orientation.z:.4f},{orientation.w:.4f}])'
+            )
+        # Reuse the collision-free IK state that was actually validated.  A
+        # pose goal would invoke a second, potentially single-seed IK search.
+        component.set_goal_state(robot_state=ik_solution)
         try:
             from moveit.planning import PlanRequestParameters
             params = PlanRequestParameters(self._moveit, 'plan_request_params')
@@ -1152,6 +1382,50 @@ class MotionExecutor(Node):
         if not result:
             raise RuntimeError(f'MoveIt planning failed for {stage}')
         return result
+
+    def _solve_moveit_ik(self, current_state, group, target_pose, tip):
+        """Try deterministic redundant-joint seeds and reject colliding IK."""
+
+        current = np.asarray(
+            current_state.get_joint_group_positions(group), dtype=np.float64
+        )
+        if current.shape != (7,) or not np.isfinite(current).all():
+            raise RuntimeError(f'{group} current joint seed is invalid')
+        # The S2 arm is redundant.  Shoulder-inner, upper-arm and forearm
+        # offsets cover alternate elbow/swivel branches without random output.
+        seed_offsets = (
+            (0.0, 0.0, 0.0),
+            (0.35, 0.0, 0.0), (-0.35, 0.0, 0.0),
+            (0.0, 0.45, 0.0), (0.0, -0.45, 0.0),
+            (0.0, 0.0, 0.55), (0.0, 0.0, -0.55),
+            (0.35, 0.35, 0.45), (-0.35, -0.35, -0.45),
+            (0.55, -0.35, 0.55), (-0.55, 0.35, -0.55),
+        )
+        monitor = self._moveit.get_planning_scene_monitor()
+        for shoulder_inner, upper_arm, forearm in seed_offsets:
+            probe = copy.copy(current_state)
+            seed = current.copy()
+            seed[0] += shoulder_inner
+            seed[2] += upper_arm
+            seed[4] += forearm
+            try:
+                probe.set_joint_group_active_positions(group, seed)
+                solved = probe.set_from_ik(
+                    group,
+                    target_pose,
+                    tip,
+                    min(0.25, self._moveit_planning_time),
+                )
+                if not solved:
+                    continue
+                probe.update()
+                with monitor.read_only() as scene:
+                    if scene.is_state_colliding(probe, group, False):
+                        continue
+                return probe
+            except Exception as exc:
+                self.get_logger().debug(f'{group} IK seed rejected: {exc}')
+        return None
 
     def _tcp_pose_to_eef_pose(self, arm, pose):
         target_position, target_orientation = self._tcp_to_eef_pose_values(arm, pose)

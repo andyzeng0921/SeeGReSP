@@ -1,0 +1,9 @@
+# Generated from one exact RGB-D frame, then reviewed and signed on site.
+# MotionExecutor rejects this file until verified is explicitly true.
+robot_id: 306
+frame_id: Link_Zero_Point
+source_sample:
+operator:
+timestamp:
+verified: false
+collision_objects: []

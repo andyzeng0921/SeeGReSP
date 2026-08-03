@@ -186,6 +186,155 @@ def is_horizontal_grasp(
     return accepted, approach_tilt, closing_tilt
 
 
+def rotate_grasp_about_local_axis(rotation, axis, angle_degrees):
+    """Roll a grasp frame without changing its position or selected local axis."""
+    rotation = orthonormalize_rotation(rotation)
+    axis = int(axis)
+    if axis < 0 or axis >= 3:
+        raise ValueError(f'grasp axis must be 0, 1 or 2, got {axis}')
+    angle = np.radians(float(angle_degrees))
+    cosine = float(np.cos(angle))
+    sine = float(np.sin(angle))
+    local = np.eye(3, dtype=np.float64)
+    first = (axis + 1) % 3
+    second = (axis + 2) % 3
+    # Rodrigues' formula in the local grasp frame.  Right multiplication
+    # preserves the selected world-space grasp axis exactly.
+    local[first, first] = cosine
+    local[second, second] = cosine
+    local[first, second] = -sine
+    local[second, first] = sine
+    return orthonormalize_rotation(rotation @ local)
+
+
+def horizontal_grasp_orientation_variants(
+    rotation,
+    *,
+    approach_axis=0,
+    closing_axis=1,
+    vertical_axis=2,
+    maximum_approach_tilt_degrees=15.0,
+    maximum_closing_tilt_degrees=15.0,
+    roll_degrees=(0.0, 90.0, -90.0, 180.0),
+):
+    """Return distinct roll-equivalent orientations passing the side-grasp gate.
+
+    Rolling around the approach axis retains the GraspNet contact position and
+    approach line.  For a rotationally symmetric bottle, +/-90 degrees converts
+    a top/bottom closing direction into a lateral jaw direction.  The 180-degree
+    branch represents the equivalent jaw direction and can expose a different
+    wrist IK branch.  This helper intentionally never tilts or reverses the
+    approach axis.
+    """
+    variants = []
+    for angle in roll_degrees:
+        candidate = rotate_grasp_about_local_axis(
+            rotation, approach_axis, angle
+        )
+        accepted, approach_tilt, closing_tilt = is_horizontal_grasp(
+            candidate,
+            approach_axis=approach_axis,
+            closing_axis=closing_axis,
+            vertical_axis=vertical_axis,
+            maximum_approach_tilt_degrees=maximum_approach_tilt_degrees,
+            maximum_closing_tilt_degrees=maximum_closing_tilt_degrees,
+        )
+        if not accepted:
+            continue
+        if any(np.allclose(candidate, item['rotation'], atol=1e-8) for item in variants):
+            continue
+        variants.append({
+            'rotation': candidate,
+            'roll_degrees': float(angle),
+            'approach_tilt_degrees': approach_tilt,
+            'closing_tilt_degrees': closing_tilt,
+        })
+    return variants
+
+
+def rotation_distance_degrees(first, second):
+    first = orthonormalize_rotation(first)
+    second = orthonormalize_rotation(second)
+    relative = first.T @ second
+    cosine = float(np.clip((np.trace(relative) - 1.0) * 0.5, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cosine)))
+
+
+def wrist_aligned_side_grasp_rows(
+    rows,
+    tcp_position,
+    tcp_rotation,
+    vertical_direction,
+    *,
+    approach_axis=0,
+    closing_axis=1,
+    maximum_approach_tilt_degrees=30.0,
+    grasp_center=None,
+):
+    """Build collision-filterable side grasps aimed from the current TCP.
+
+    Scores and widths remain model outputs. For a bottle, ``grasp_center`` may
+    supply the exact RGB-D target center instead of a noisy network translation.
+    Approach points from the current TCP to that center, jaw closing is
+    perpendicular to gravity, and the equivalent jaw sign nearest to the current
+    TCP orientation is retained. Returned values remain standard 17-field
+    GraspNet rows and therefore can enter the official collision filter.
+    """
+    if int(approach_axis) != 0 or int(closing_axis) != 1:
+        raise ValueError(
+            'wrist-aligned side grasps currently require approach_axis=0 '
+            'and closing_axis=1'
+        )
+    tcp_position = np.asarray(tcp_position, dtype=np.float64).reshape(3)
+    tcp_rotation = orthonormalize_rotation(tcp_rotation)
+    vertical = np.asarray(vertical_direction, dtype=np.float64).reshape(3)
+    vertical_norm = float(np.linalg.norm(vertical))
+    if vertical_norm < 1e-9:
+        raise ValueError('vertical direction norm cannot be zero')
+    vertical /= vertical_norm
+    if grasp_center is not None:
+        grasp_center = np.asarray(grasp_center, dtype=np.float64).reshape(3)
+        if not np.all(np.isfinite(grasp_center)):
+            raise ValueError('grasp center must contain finite values')
+    output = []
+    for row in np.asarray(rows):
+        grasp = parse_grasp_array(row)
+        center = grasp['translation'] if grasp_center is None else grasp_center
+        approach = center - tcp_position
+        distance = float(np.linalg.norm(approach))
+        if distance < 1e-6:
+            continue
+        approach /= distance
+        vertical_component = float(np.clip(abs(np.dot(approach, vertical)), 0.0, 1.0))
+        approach_tilt = float(np.degrees(np.arcsin(vertical_component)))
+        if approach_tilt > float(maximum_approach_tilt_degrees):
+            continue
+        closing = np.cross(vertical, approach)
+        closing_norm = float(np.linalg.norm(closing))
+        if closing_norm < 1e-6:
+            continue
+        closing /= closing_norm
+        binormal = np.cross(approach, closing)
+        base_rotation = orthonormalize_rotation(
+            np.column_stack((approach, closing, binormal))
+        )
+        equivalent_rotation = rotate_grasp_about_local_axis(
+            base_rotation, approach_axis, 180.0
+        )
+        selected_rotation = min(
+            (base_rotation, equivalent_rotation),
+            key=lambda value: rotation_distance_degrees(tcp_rotation, value),
+        )
+        generated = np.asarray(row, dtype=np.float64).copy()
+        generated[4:13] = selected_rotation.reshape(-1)
+        generated[13:16] = center
+        output.append(generated)
+    if not output:
+        width = np.asarray(rows).shape[-1] if np.asarray(rows).ndim == 2 else 17
+        return np.empty((0, width), dtype=np.float64)
+    return np.asarray(output, dtype=np.float64)
+
+
 def parse_grasp_array(row):
     row = np.asarray(row, dtype=np.float64).reshape(-1)
     if row.size < 16:

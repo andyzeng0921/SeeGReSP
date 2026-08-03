@@ -19,13 +19,28 @@ ROS 2 包名：`adaptive_object_grasping`
   MoveIt 规划、双臂轨迹适配和可视化。
 - 当前执行语义是“一只主动臂抓取，另一只臂保持”，不是双臂协同搬运。
 - 真实运动只有 `MotionExecutor` 一个出口，且交付配置保持锁定。
+- 瓶子专用侧抓从当前 TCP 指向同帧 RGB-D 三维中心，生成水平闭合轴和自然腕姿
+  等价方向，并在进入 MoveIt 前重新执行 GraspNet 点云碰撞过滤。
+- 深度桌面建模支持五帧融合、PlanningScene 临时注入、RViz 重叠检查和原配置恢复。
+- OpenClaw agent 已包含视觉抓取、RGB-D 桌面仿真和视觉导航 skill；导航保持
+  只读/干运行，当前项目只验证机械臂抓取链。
 - 已跑通 robosuite `TwoArmLift / Panda × 2` 的 14 维双七轴无硬件仿真。
+- 当前验证结果为 `144 pytest` 与 `150 colcon tests`，均无失败。
 
 完整设计和参考项目分别见：
 
 - `docs/ARCHITECTURE_V2_ZH.md`
 - `docs/HIGH_STAR_DUAL_ARM_REFERENCES_ZH.md`
+- `docs/SITE_SCENE_AND_RESET_CALIBRATION_ZH.md`
 - `HANDOFF.md`
+
+## 最新实机干运行状态
+
+- 原先 4 个瓶子候选全部被方向过滤的问题已解决。
+- 左臂自然腕姿候选不再出现预抓取 KDL IK 无解；候选能够进入 MoveIt 响应处理。
+- 当前剩余阻塞为 `AddTimeOptimalParameterization` 无法生成受约束时间轨迹。需要先
+  核验 AutoLife S2 七轴关节速度/加速度限制，再验证 TOTG 或 Ruckig。
+- 完整 pregrasp/grasp/lift 尚未成功，因此当前结果不能用于实机执行。
 
 ## V2 数据链
 
@@ -35,6 +50,7 @@ RealSense RGB-D
   -> 项目内原子 observation 文件（RGB/depth/mask/intrinsics）
   -> token + size + SHA256
   -> GraspNet + 场景碰撞过滤
+  -> 瓶子 TCP 可达域/自然腕姿侧抓候选
   -> 对同一 track 的新帧重验证
   -> MoveIt dry-run
   -> MotionExecutor 安全门
@@ -71,13 +87,16 @@ cd "/home/ubuntu/zeng-Visual Grasping"
 tools/graspctl.sh start
 tools/graspctl.sh status
 tools/graspctl.sh list
+tools/graspctl.sh scene bottle
 tools/graspctl.sh plan bottle auto
 tools/graspctl.sh logs 200
 tools/graspctl.sh stop
 ```
 
+`scene` 会先保存同一时刻的 RGB、对齐深度、实例 mask、相机内参和 TF 诊断。
 `plan` 的安全失败是正常结果：目标移动、遮挡、候选被碰撞/宽度/方向过滤，或
-重验证位置变化超过阈值时都会 fail closed。不要为得到“成功”而放宽这些阈值。
+重验证、IK、路径、时间参数化不合格时都会 fail closed。不要为得到“成功”而
+放宽这些阈值。
 
 `graspctl.sh stop` 只停止本项目 ROS 节点，不是机器人停止命令，也不能终止已经
 下发的厂商轨迹。现场立即停止只能使用经过验证的实体急停。

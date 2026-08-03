@@ -76,8 +76,6 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Marker Topic:
-        Value: /adaptive_grasp/grasp_markers
       Name: Grasp Candidates
       Namespaces:
         best_grasp: true
@@ -85,6 +83,7 @@ Visualization Manager:
         selected_object: true
       Queue Size: 2
       Reliability Policy: Best Effort
+      Topic: /adaptive_grasp/grasp_markers
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true

@@ -1,0 +1,4 @@
+interface:
+  display_name: "RGB-D Tabletop Simulation"
+  short_description: "Build and validate RGB-D tabletop collision scenes"
+  default_prompt: "Use $rgbd-tabletop-simulation to build and validate a tabletop scene from fresh RGB-D samples."

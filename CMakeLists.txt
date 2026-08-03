@@ -62,6 +62,9 @@ install(PROGRAMS
   tools/probe_hardware.sh
   tools/check_dual_arm_profile.py
   tools/check_execution_readiness.py
+  tools/calibrate_environment.py
+  tools/calibrate_visible_reset.py
+  tools/install_moveit_overlay.sh
   DESTINATION share/${PROJECT_NAME}/tools
 )
 
@@ -79,6 +82,9 @@ if(BUILD_TESTING)
   ament_add_pytest_test(hardware_health_core_test test/test_hardware_health_core.py)
   ament_add_pytest_test(safety_core_test test/test_safety_core.py)
   ament_add_pytest_test(robot_profile_test test/test_robot_profile.py)
+  ament_add_pytest_test(environment_scene_core_test test/test_environment_scene_core.py)
+  ament_add_pytest_test(moveit_config_test test/test_moveit_config.py)
+  ament_add_pytest_test(visible_reset_core_test test/test_visible_reset_core.py)
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

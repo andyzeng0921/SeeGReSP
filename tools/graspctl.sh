@@ -46,7 +46,11 @@ require_installed_config_sync() {
     echo "Cannot resolve the installed adaptive_object_grasping share directory." >&2
     exit 3
   }
-  for rel in config/motion.yaml config/site_acceptance.yaml; do
+  for rel in \
+    config/motion.yaml \
+    config/site_acceptance.yaml \
+    config/environment_scene.yaml \
+    config/visible_reset_pose.yaml; do
     [[ -f "$installed_share/$rel" ]] || {
       echo "Installed configuration is missing: $installed_share/$rel" >&2
       exit 3
@@ -97,6 +101,24 @@ case "${1:-help}" in
     timeout 15 ros2 service call /list_grasp_objects \
       adaptive_object_grasping/srv/ListObjects '{}'
     ;;
+  scene|sample)
+    label="${2:-bottle}"
+    track_id="${3:--1}"
+    valid_label "$label"
+    [[ "$track_id" =~ ^-?[0-9]+$ ]] || {
+      echo "Track ID must be an integer." >&2
+      exit 2
+    }
+    stack_running || {
+      echo "Grasp stack is stopped. Run: $0 start" >&2
+      exit 2
+    }
+    timeout 30 "$ROOT/third_party/venv/bin/python" \
+      "$ROOT/tools/observe_scene.py" \
+      --label "$label" \
+      --track-id "$track_id" \
+      --output-directory "$RUNTIME/scene_samples"
+    ;;
   plan)
     label="${2:-bottle}"
     arm="${3:-auto}"
@@ -109,6 +131,13 @@ case "${1:-help}" in
       adaptive_object_grasping/action/PickObject \
       "{track_id: -1, label: '$label', preferred_arm: '$arm', execute: false, execution_confirmation: '', maximum_tracking_time: 15.0, required_stable_duration: 0.3}" \
       --feedback
+    ;;
+  reset-plan)
+    stack_running || {
+      echo "Grasp stack is stopped. Run: $0 start" >&2
+      exit 2
+    }
+    timeout 120 ros2 service call /plan_visible_reset std_srvs/srv/Trigger '{}'
     ;;
   execute)
     label="${2:-}"
@@ -141,7 +170,9 @@ case "${1:-help}" in
   *)
     cat <<EOF
 Usage:
-  $0 start | stop | status | list | logs [lines]
+  $0 start | stop | status | list | logs [lines] | reset-plan
+  $0 scene <label> [track_id]       Exact RGB-D + bottle/arm 3D sample (read-only)
+  $0 sample <label> [track_id]      Alias for scene
   $0 plan <label> [auto|left|right]
   $0 execute <label> [auto|left|right] $CONFIRMATION
 EOF

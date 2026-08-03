@@ -1,0 +1,56 @@
+robostral_navigate_server:
+  ros__parameters:
+    # ---- Backend selection ----
+    # "qwen_robotnav"   – Qwen-RobotNav (Qwen3-VL, 2B/4B/8B)
+    # "robostral"       – RoboStral Navigate (Mistral, 8B)
+    model_type: qwen_robotnav
+
+    # GPUStack credentials are injected at runtime. Never commit them here.
+    api_url: ""
+    api_key: ""
+    vl_model: qwen3-vl-8b-instruct
+    llm_model: qwen3.5-35b-a3b
+
+    # ---- Camera input ----
+    color_topic: /head_camera/color/image_raw
+    camera_info_topic: /head_camera/color/camera_info
+    base_frame: Link_Zero_Point
+
+    # ---- Model ---
+    # Path to checkpoint directory or HuggingFace repo ID.
+    # Empty → placeholder mode (integration test only).
+    model_path: ""
+    model_size: 4B    # 2B | 4B | 8B  (Qwen-RobotNav only)
+    device: cuda:0
+    image_width: 1280
+    image_height: 720
+
+    # ---- Task mode (Qwen-RobotNav) ----
+    # Default task mode when no explicit mode is requested.
+    # vln | pointnav | objnav | tracking | driving
+    default_task_mode: vln
+
+    # ---- Observation protocol (Qwen-RobotNav) ----
+    # These are inference-time controls; the model generalises to any
+    # configuration without retraining.  See navigation_core.py for details.
+    obs_token_budget: 3584
+    obs_temporal_decay: 2.0
+    obs_frame_sample_mode: random         # random | latest
+    # Per-camera importance weights.  Higher weight → more visual tokens.
+    obs_camera_weights:
+      Front View: 1.0
+
+    # ---- Navigation ----
+    maximum_steps: 80
+    task_timeout: 120.0
+    minimum_step_period: 0.1
+
+    # ---- Ground-plane assumption ----
+    camera_ground_distance_m: 1.25
+
+    # ---- Safety ----
+    dry_run: true
+    publish_target_pose: true
+
+    # ---- Coordinate frame for published goal poses ----
+    goal_frame: grasp_nav_target

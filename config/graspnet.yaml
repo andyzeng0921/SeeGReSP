@@ -35,6 +35,20 @@ graspnet_server:
     vertical_axis: 2
     maximum_approach_tilt_degrees: 30.0
     maximum_closing_tilt_degrees: 30.0
+    # Bottles are approximately rotationally symmetric around the vertical
+    # axis. Preserve every GraspNet contact/approach line, but roll rejected
+    # frames so the jaws close laterally. +/-90 are jaw-direction equivalents
+    # and can expose different wrist IK branches; no tilt threshold is relaxed.
+    bottle_side_grasp_enabled: true
+    bottle_side_grasp_labels: [bottle]
+    bottle_side_roll_degrees: [90.0, -90.0, 180.0]
+    # Generate a bottle side approach from the live arm TCP toward each model
+    # grasp center. These rows enter GraspNet's official scene-cloud collision
+    # filter before MoveIt and are ordered by proximity to the current wrist.
+    bottle_wrist_aligned_enabled: true
+    bottle_wrist_aligned_use_target_center: true
+    left_tcp_frame: left_grasp_tcp
+    right_tcp_frame: right_grasp_tcp
     # Keep execution at the collision-checked GraspNet translation. Enabling
     # depth offset requires a second swept-volume check with calibrated S2 fingers.
     apply_grasp_depth: false
