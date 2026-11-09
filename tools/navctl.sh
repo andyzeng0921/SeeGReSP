@@ -13,8 +13,6 @@ export ROBOT_ID="${ROBOT_ID:-306}"
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 export CYCLONEDDS_URI="${CYCLONEDDS_URI:-<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"lo\"/></Interfaces></General><Discovery><ParticipantIndex>auto</ParticipantIndex><MaxAutoParticipantIndex>200</MaxAutoParticipantIndex></Discovery></Domain></CycloneDDS>}"
 
-API_URL="${GPUSTACK_API_URL:-}"
-API_KEY="${GPUSTACK_API_KEY:-}"
 VL_MODEL="${VL_MODEL:-qwen3-vl-8b-instruct}"
 TEXT_MODEL="${TEXT_MODEL:-qwen3.5-35b-a3b}"
 
@@ -29,23 +27,25 @@ mkdir -p "$RUNTIME"
 _ros2_ok() { ros2 topic list &>/dev/null; }
 
 _require_vl_credentials() {
-  [[ -n "$API_URL" && -n "$API_KEY" ]] || {
+  [[ -n "${GPUSTACK_API_URL:-}" && -n "${GPUSTACK_API_KEY:-}" ]] || {
     echo "VL credentials are not configured. Export GPUSTACK_API_URL and GPUSTACK_API_KEY outside the repository." >&2
     return 1
   }
 }
 
 _capture_camera() {
-  local output="${1:-/tmp/nav_camera_current.jpg}"
+  local output="$1"
   if [[ ! -f "$HEAD_CAM_SHM" ]]; then
     echo "HEAD CAMERA SHM NOT FOUND: $HEAD_CAM_SHM" >&2
     return 1
   fi
-  python3 <<PYEOF
-data = open('$HEAD_CAM_SHM', 'rb').read()
+  python3 - "$HEAD_CAM_SHM" "$output" <<'PYEOF' || return 1
+import sys
+from pathlib import Path
+data = Path(sys.argv[1]).read_bytes()
 eoi = data.find(b'\xff\xd9')
 jpeg = data[:eoi+2] if eoi > 0 else data
-open('$output', 'wb').write(jpeg)
+Path(sys.argv[2]).write_bytes(jpeg)
 PYEOF
   echo "$output"
 }
@@ -53,23 +53,26 @@ PYEOF
 _send_image_to_vl() {
   local img="$1" prompt="$2" max_tokens="${3:-512}"
   _require_vl_credentials || return 1
-  cat <<PYEOF | python3
-import json, urllib.request, base64, sys
-with open('$img', 'rb') as f:
+  python3 - "$img" "$prompt" "$VL_MODEL" "$max_tokens" <<'PYEOF'
+import base64, json, os, sys, urllib.request
+img, prompt, model, max_tokens = sys.argv[1:]
+with open(img, 'rb') as f:
     b64 = base64.b64encode(f.read()).decode('utf-8')
-prompt = '''${prompt}'''
 payload = {
-    'model': '$VL_MODEL',
+    'model': model,
     'messages': [{'role': 'user', 'content': [
         {'type': 'text', 'text': prompt},
         {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}}
     ]}],
-    'max_tokens': $max_tokens, 'temperature': 0.3
+    'max_tokens': int(max_tokens), 'temperature': 0.3
 }
 req = urllib.request.Request(
-    '$API_URL/chat/completions',
+    os.environ['GPUSTACK_API_URL'].rstrip('/') + '/chat/completions',
     data=json.dumps(payload).encode('utf-8'),
-    headers={'Authorization': 'Bearer $API_KEY', 'Content-Type': 'application/json'}
+    headers={
+        'Authorization': 'Bearer ' + os.environ['GPUSTACK_API_KEY'],
+        'Content-Type': 'application/json',
+    },
 )
 resp = urllib.request.urlopen(req, timeout=180)
 result = json.loads(resp.read())
@@ -82,20 +85,24 @@ PYEOF
 _api_chat() {
   local system="$1" user="$2" max_tokens="${3:-1024}" temperature="${4:-0.7}"
   _require_vl_credentials || return 1
-  cat <<PYEOF | python3
-import json, urllib.request, sys
+  python3 - "$system" "$user" "$TEXT_MODEL" "$max_tokens" "$temperature" <<'PYEOF'
+import json, os, sys, urllib.request
+system, user, model, max_tokens, temperature = sys.argv[1:]
 payload = {
-    'model': '$TEXT_MODEL',
+    'model': model,
     'messages': [
-        {'role': 'system', 'content': '''${system}'''},
-        {'role': 'user', 'content': '''${user}'''}
+        {'role': 'system', 'content': system},
+        {'role': 'user', 'content': user}
     ],
-    'max_tokens': $max_tokens, 'temperature': $temperature
+    'max_tokens': int(max_tokens), 'temperature': float(temperature)
 }
 req = urllib.request.Request(
-    '$API_URL/chat/completions',
+    os.environ['GPUSTACK_API_URL'].rstrip('/') + '/chat/completions',
     data=json.dumps(payload).encode('utf-8'),
-    headers={'Authorization': 'Bearer $API_KEY', 'Content-Type': 'application/json'}
+    headers={
+        'Authorization': 'Bearer ' + os.environ['GPUSTACK_API_KEY'],
+        'Content-Type': 'application/json',
+    },
 )
 resp = urllib.request.urlopen(req, timeout=180)
 result = json.loads(resp.read())
@@ -106,6 +113,13 @@ if not content:
 print(content)
 PYEOF
 }
+
+_describe_camera() (
+  img=$(mktemp) || exit 1
+  trap 'rm -f -- "$img"' EXIT
+  _capture_camera "$img" >/dev/null || exit 1
+  _send_image_to_vl "$img" "$1" 512
+)
 
 # ============================================================================
 case "${1:-help}" in
@@ -120,13 +134,11 @@ case "${1:-help}" in
     ;;
 
   see)
-    img=$(_capture_camera) || exit 1
-    _send_image_to_vl "$img" "${2:-Describe what you see in this image: objects, obstacles, traversable space.}" 512
+    _describe_camera "${2:-Describe what you see in this image: objects, obstacles, traversable space.}"
     ;;
 
   decide)
-    img=$(_capture_camera) || exit 1
-    _send_image_to_vl "$img" "${2:-Based on this front camera image, determine if the path ahead is clear. Output exactly: DIRECTION: [forward|left|right|backward|stop] REASON: [brief reason]}" 512
+    _describe_camera "${2:-Based on this front camera image, determine if the path ahead is clear. Output exactly: DIRECTION: [forward|left|right|backward|stop] REASON: [brief reason]}"
     ;;
 
   go)

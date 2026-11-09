@@ -42,6 +42,18 @@ def _finite_array(value, expected_size):
         return False
 
 
+def _heartbeat_mask(value, name):
+    error = f'{name} must be a non-negative integer'
+    if isinstance(value, str):
+        try:
+            value = int(value, 10)
+        except ValueError as exc:
+            raise ValueError(error) from exc
+    if type(value) is not int or value < 0:
+        raise ValueError(error)
+    return value
+
+
 def joint_status_blockers(payload):
     """Validate joint array shape, numeric content and communication flags."""
 
@@ -111,27 +123,29 @@ def robot_state_blockers(
         blockers.append(f'robot protection reason is {protection.get("reason")!r}')
 
     try:
-        expected = int(protection.get('heartbeat_expected_mask', 0))
-        ready = int(protection.get('heartbeat_ready_mask', 0))
-        lost = int(protection.get('heartbeat_lost_mask', 0))
-        required = int(required_heartbeat_mask)
-    except (TypeError, ValueError):
-        expected, ready, lost, required = 0, 0, -1, -1
-        blockers.append('heartbeat masks are invalid')
-    if required <= 0:
-        blockers.append('required heartbeat mask must be positive')
-    elif expected != required:
-        blockers.append(
-            f'heartbeat expected mask is {expected}, required exactly {required}'
+        expected, ready, lost = (
+            _heartbeat_mask(protection.get(key), key) for key in (
+                'heartbeat_expected_mask', 'heartbeat_ready_mask', 'heartbeat_lost_mask',
+            )
         )
-    if required > 0 and ready & required != required:
-        blockers.append(
-            f'heartbeat not ready: required_mask={required}, ready_mask={ready}'
-        )
-    if required > 0 and lost & required:
-        blockers.append(
-            f'heartbeat lost: required_mask={required}, lost_mask={lost}'
-        )
+        required = _heartbeat_mask(required_heartbeat_mask, 'required_heartbeat_mask')
+    except ValueError as exc:
+        blockers.append(str(exc))
+    else:
+        if required == 0:
+            blockers.append('required heartbeat mask must be positive')
+        if expected != required:
+            blockers.append(
+                f'heartbeat expected mask is {expected}, required exactly {required}'
+            )
+        if ready != required:
+            blockers.append(
+                f'heartbeat not ready: required_mask={required}, ready_mask={ready}'
+            )
+        if lost != 0:
+            blockers.append(
+                f'heartbeat lost: required_mask={required}, lost_mask={lost}'
+            )
     if protection.get('heartbeat_protection_armed') is not True:
         blockers.append('heartbeat protection is not armed')
     if data.get('notifications'):
