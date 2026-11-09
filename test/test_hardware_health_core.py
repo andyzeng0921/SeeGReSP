@@ -1,5 +1,7 @@
 import copy
 
+import pytest
+
 from adaptive_object_grasping_nodes.hardware_health_core import (
     JOINT_STATUS_GROUP_SIZES,
     ROBOT_STATE_GROUP_SIZES,
@@ -58,6 +60,32 @@ def test_healthy_robot_protection_state_passes():
     data = healthy_robot_state()
     assert robot_state_blockers(data) == []
     assert robot_state_summary(data)['heartbeat_ready_mask'] == 31
+
+
+def test_legacy_integer_strings_in_heartbeat_masks_still_pass():
+    data = healthy_robot_state()
+    for key in ('heartbeat_expected_mask', 'heartbeat_ready_mask', 'heartbeat_lost_mask'):
+        data['protection'][key] = str(data['protection'][key])
+    assert robot_state_blockers(data) == []
+
+
+def test_missing_lost_mask_blocks_readiness():
+    data = healthy_robot_state()
+    del data['protection']['heartbeat_lost_mask']
+    assert robot_state_blockers(data)
+
+
+@pytest.mark.parametrize(('field', 'value'), [
+    ('heartbeat_ready_mask', -1),
+    ('heartbeat_ready_mask', 63),
+    ('heartbeat_expected_mask', 31.5),
+    ('heartbeat_lost_mask', False),
+    ('heartbeat_lost_mask', 32),
+])
+def test_inconsistent_or_malformed_heartbeat_blocks_readiness(field, value):
+    data = healthy_robot_state()
+    data['protection'][field] = value
+    assert robot_state_blockers(data)
 
 
 def test_live_306_unarmed_heartbeat_sample_is_blocked():
